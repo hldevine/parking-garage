@@ -1,0 +1,1220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- ======================================================================================
+     PARTICIPANT TEXT: everything participants read on this page. Edit the wording here.
+     (The main task instructions go in the Qualtrics question text above the garage.)
+     ====================================================================================== -->
+<script>
+window.GARAGE_TEXT = {
+  begin: 'Click to begin',                                    // the start screen; the click starts the timing
+  loading: 'Loading\u2026',                                    // on the start button until every picture has loaded
+  task: '[instructions]',                                     // shown at the top of the screen, before the controls
+  controls: 'Walk: W A S D or the arrow keys \u00b7 Look around: move the mouse \u00b7 Esc frees the mouse; click the garage to look around again',
+  linkError: 'This link is incomplete, so the garage cannot start. Please tell the researcher.',
+};
+</script>
+<!-- ================================ end of participant text ============================== -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">   <!-- the study page is public on GitHub Pages; keep it out of search results -->
+<title>Parking Garage Scene</title>
+<style>
+  :root { --panel: rgba(18, 24, 28, 0.9); --fg: #e8eef0; --muted: #9fb0b7; --accent: #6fd3d6; }
+  html, body { margin: 0; height: 100%; background: #111; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); }
+  canvas { display: block; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; padding: 8px 16px; background: rgba(10, 13, 16, 0.82); text-align: center;
+         font-size: 14px; line-height: 1.4; z-index: 5; pointer-events: none; }
+  #bar-task { display: block; font-weight: 600; }
+  #bar-controls { display: block; color: var(--muted); font-size: 13px; }
+  .screen { position: fixed; inset: 0; background: #0b0e11; display: flex; align-items: center; justify-content: center; z-index: 10; padding: 16px; }
+  .screen p { max-width: 36em; text-align: center; font-size: 17px; }
+  #begin { font-size: 20px; padding: 14px 28px; border-radius: 8px; }
+  [hidden] { display: none !important; }
+  #panel { position: fixed; top: 64px; left: 12px; width: min(350px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto;
+           background: var(--panel); border-radius: 8px; padding: 14px 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; }
+  h1 { font-size: 16px; margin: 0; }
+  .sub { color: var(--muted); margin: 0; font-size: 13px; }
+  fieldset { border: 1px solid #34424a; border-radius: 6px; margin: 0; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+  legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+  .cue { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; font-size: 13px; }
+  select, button { font: inherit; padding: 5px 8px; border-radius: 5px; border: 1px solid #44545b; background: #1f2a2f; color: var(--fg); }
+  button { cursor: pointer; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  #status { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--accent); }
+  .note { color: var(--muted); font-size: 12px; margin: 0; }
+</style>
+<!-- three.js r0.170.0, kept in this folder (vendor/) so the study doesn't depend on a CDN; copied unchanged from jsDelivr -->
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three-0.170.0/build/three.module.js",
+    "three/addons/": "./vendor/three-0.170.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="panel" hidden>
+  <h1>Parking garage scene</h1>
+  <div class="row">
+    <button id="preset-control" type="button">Control</button>
+    <button id="preset-threat" type="button">Threat</button>
+  </div>
+  <fieldset>
+    <legend>Cues</legend>
+    <label class="cue" for="c-light">Lighting
+      <select id="c-light"><option value="high">Bright</option><option value="low">Low</option></select></label>
+    <label class="cue" for="c-entrap">Entrapment
+      <select id="c-entrap"><option value="low">Low: exits open</option><option value="high">High: exits blocked</option></select></label>
+    <label class="cue" for="c-conceal">Concealment
+      <select id="c-conceal"><option value="low">Low: open sightlines</option><option value="high">High: hiding places</option></select></label>
+  </fieldset>
+  <div class="row">
+    <button id="log" type="button">Download event log</button>
+  </div>
+  <p class="note">Researcher mode (?debug=1). Participants never see this panel.</p>
+</div>
+<div id="bar" hidden><span id="bar-task"></span><span id="bar-controls"></span></div>
+<div id="start-screen" class="screen" hidden><button id="begin" type="button"></button></div>
+<div id="error-screen" class="screen" hidden><p id="error-text"></p></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+// ================= Settings to change =================
+const CONFIG = {
+  exposureSeconds: 60,
+  eyeHeight: 1.6,       // desktop preview only; the headset uses the person's real height
+  ceiling: 2.8,         // metres
+  garageLength: 60,     // along the aisle
+  lighting: {
+    high: { ambient: 0.95, lampIntensity: 10, fixturesOnShare: 1.0, fogFar: 90, flicker: false, targetBrightness: [1, 1, 1, 1, 1, 1] },
+    low:  { ambient: 0.65, lampIntensity: 8,  fixturesOnShare: 0.25, fogFar: 32, flicker: false, targetBrightness: [0.559, 0.425, 0.177, 0.769, 0.262, 0.262] },
+    // targetBrightness: how bright each search target T1-T6 is (1 = as drawn). Dimmed in low lighting so each target stands out
+    // from its surroundings as much as in bright lighting (measured with garageCapture({ signStats: true })).
+  },
+  concealment: {
+    low:  { occupancy: 0.5, tallShare: 0.0 },  // share of bays filled; share of vehicles that are vans/SUVs
+    high: { occupancy: 0.5,  tallShare: 0.6 },
+  },
+  // ---- Two-level layout ----
+  levels: {
+    drop: 3.1,             // metres from one floor down to the next
+    names: ['P2', 'P1'],   // stencilled level names, upper level first
+    farExit: [false, true], // whether each level has the large exit ramp at the far end (upper level: none)
+    carSeeds: [5, 354],    // each number fixes which bays are filled on that level (5 = the arrangement you had before).
+                           // With occupancy 0.5 and tallShare 0.6, both give 20 vehicles per level, 14 of them vans in the threat version.
+                           // If you change those two settings, the levels may stop matching: count the vehicles again, or try other numbers here.
+  },
+  // ---- Realism settings (the same in every condition) ----
+    walk: { speed: 3.5, halfWidth: 3.0, endGap: 1.5 }, // walking speed in metres per second; how far from the centre line and from each end you can go
+    look: { degreesPerPixel: 0.15, maxPitch: 85 },    // how far the view turns per pixel of mouse movement; how far you can look up or down (degrees)
+    outside: { photo: 'textures/day_external_4096.jpg', brightness: 1, turn: 2 },   // 360-degree photo seen outside, in control only (see showOutside). A 3.7 MB web copy of day_external.jpg (Unity uses the full 8192 px); '' = the built-in night skyline
+    fixtureGlow: 0.5,     // soft glow on the ceiling around each lit fixture (0 = off, 1 = strong)
+    floorTexture: {       // leave the three paths empty to use the built-in generated concrete
+    color: 'textures/concrete_floor_worn_001_diff_1k.jpg',
+    normal: 'textures/concrete_floor_worn_001_nor_gl_1k.jpg',
+    roughness: 'textures/concrete_floor_worn_001_rough_1k.jpg',
+    tileMetres: 3,      // how many metres one copy of the photo covers
+    brightness: 1.15,   // 1 = the photo as it is; higher = lighter floor, lower = darker
+  },
+};
+
+// ================= Renderer and viewer =================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+// ---- From the link: ?c=0 (control) or ?c=1 (threat), &pid=..., and ?debug=1 for the researcher panel and tools ----
+const params = new URLSearchParams(location.search);
+const DEBUG = params.get('debug') === '1';
+const condCode = params.get('c');                                       // the code as given; checked at the end of the script
+const pid = (params.get('pid') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);   // only safe characters, for the CSV
+if (DEBUG) document.body.appendChild(VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking', 'local-floor'] }));
+
+const scene = new THREE.Scene();
+const NIGHT = new THREE.Color(0x06080d);      // plain dark outside: what the threat condition shows
+scene.background = NIGHT;
+let outsidePhoto = null;
+if (CONFIG.outside.photo) new THREE.TextureLoader().load(CONFIG.outside.photo, photo => {   // a 360-degree photo wrapped around the whole scene
+  photo.mapping = THREE.EquirectangularReflectionMapping; photo.colorSpace = THREE.SRGBColorSpace;
+  scene.backgroundIntensity = CONFIG.outside.brightness; scene.backgroundRotation.y = CONFIG.outside.turn;
+  outsidePhoto = photo; showOutside();
+}, undefined, () => console.warn('Could not load the outside photo: ' + CONFIG.outside.photo));
+// The outside photo is shown only while the sides are open (entrapment low = control). With entrapment high (threat)
+// the walls already block the view; the plain dark background also stops daylight leaking through hairline gaps between boxes.
+function showOutside() { scene.background = cond.entrapment === 'low' && outsidePhoto ? outsidePhoto : NIGHT; }
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 200);
+camera.position.set(0, CONFIG.eyeHeight, 0);
+camera.rotation.order = 'YXZ';                                          // turn left/right first, then up/down (see "Looking around")
+const player = new THREE.Group(); player.position.set(0.8, 0, 0); scene.add(player); player.add(camera);
+
+// ================= Materials =================
+const mat = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.92, ...o });
+const M = {
+  floor: mat(0x5c5d5f), ceiling: mat(0x6b6c6e), wall: mat(0x78797b), pillar: mat(0x8a8b8d),
+  paint: mat(0xd8d2b0), stripe: mat(0xd9b52c), gate: mat(0x4a4d52, { metalness: 0.5, roughness: 0.5 }),
+  tubeOn: new THREE.MeshStandardMaterial({ color: 0xf4f8ff, emissive: 0xe8f0ff, emissiveIntensity: 1.6 }),
+  tubeOff: mat(0x3a3b3d),
+  exitOn: new THREE.MeshStandardMaterial({ color: 0x1f8f4a, emissive: 0x22c55e, emissiveIntensity: 1.4 }),
+  exitOff: mat(0x1d2a22),
+  dumpster: mat(0x2f4a36), glass: mat(0x1c2530, { roughness: 0.3, metalness: 0.2 }),
+  door: mat(0x6a5a44),
+};
+const carColors = [0x8b1e1e, 0x1e3a5f, 0x2d2d2d, 0xb8b8b8, 0x3f5f3f, 0xe6e6e6, 0x5b4b3a];
+
+// ================= Generated surfaces (drawn in code, so there is nothing to download) =================
+// Each surface is a picture drawn once when the page loads, from fixed random seeds,
+// so it comes out identical on every run and in every condition.
+let texSeed = 1234;
+const texRand = () => (texSeed = (texSeed * 16807) % 2147483647) / 2147483647;
+const maxAniso = Math.min(8, renderer.capabilities.getMaxAnisotropy()); // keeps the floor sharp at shallow angles
+function canvasOf(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+// Smooth random values (0..1) that wrap at the edges, so a surface can repeat without visible seams.
+function tileNoise(w, h, cellsX, cellsY) {
+  const g = new Float32Array(cellsX * cellsY).map(texRand), out = new Float32Array(w * h), ease = t => t * t * (3 - 2 * t);
+  for (let y = 0; y < h; y++) {
+    const fy = y / h * cellsY, y0 = Math.floor(fy), ty = ease(fy - y0), y1 = (y0 + 1) % cellsY;
+    for (let x = 0; x < w; x++) {
+      const fx = x / w * cellsX, x0 = Math.floor(fx), tx = ease(fx - x0), x1 = (x0 + 1) % cellsX;
+      const a = g[y0 * cellsX + x0], b = g[y0 * cellsX + x1], c = g[y1 * cellsX + x0], d = g[y1 * cellsX + x1];
+      out[y * w + x] = (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty;
+    }
+  }
+  return out;
+}
+// Concrete mottling: large blotches, medium patches and fine grain added together.
+function concreteCanvas(w, h, cells, mid, contrast) {
+  const f = new Float32Array(w * h), ratio = h / w;
+  for (const [c, amount] of [[cells, 0.45], [cells * 4, 0.25], [cells * 16, 0.18], [cells * 64, 0.12]]) {
+    const n = tileNoise(w, h, c, Math.max(1, Math.round(c * ratio)));
+    for (let i = 0; i < f.length; i++) f[i] += n[i] * amount;
+  }
+  const cv = canvasOf(w, h), g = cv.getContext('2d', { willReadFrequently: true }), img = g.createImageData(w, h);
+  for (let i = 0; i < f.length; i++) {
+    const v = mid + (f[i] - 0.5) * contrast;
+    img.data[i * 4] = v; img.data[i * 4 + 1] = v; img.data[i * 4 + 2] = v * 0.985; img.data[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  return cv;
+}
+function blot(g, x, y, r, rgb, alpha) {           // a soft-edged stain
+  const grad = g.createRadialGradient(x, y, 0, x, y, r);
+  grad.addColorStop(0, `rgba(${rgb},${alpha})`); grad.addColorStop(0.6, `rgba(${rgb},${alpha * 0.5})`); grad.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = grad; g.fillRect(x - r, y - r, r * 2, r * 2);
+}
+function cracks(g, w, h, count, alpha) {
+  g.strokeStyle = `rgba(22,22,24,${alpha})`; g.lineWidth = 1.2;
+  for (let i = 0; i < count; i++) {
+    let x = w * (0.1 + 0.8 * texRand()), y = h * (0.1 + 0.8 * texRand()), a = texRand() * Math.PI * 2;
+    g.beginPath(); g.moveTo(x, y);
+    for (let s = 0, steps = 20 + texRand() * 40; s < steps; s++) { a += (texRand() - 0.5) * 0.7; x += Math.cos(a) * 4; y += Math.sin(a) * 4; g.lineTo(x, y); }
+    g.stroke();
+  }
+}
+function joint(g, x, y, w, h) { g.fillStyle = 'rgba(24,24,26,0.5)'; g.fillRect(x, y, w, h); } // a groove between slabs or formwork panels
+function asTexture(canvas, metresX, metresY, colour = true) {
+  const t = new THREE.CanvasTexture(canvas);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / metresX, 1 / metresY); t.anisotropy = maxAniso;
+  if (colour) t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+// Average brightness of a picture, used so that adding it to a surface doesn't make that surface darker overall.
+function meanBrightness(canvas) {
+  const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data; let sum = 0, n = 0;
+  for (let i = 0; i < d.length; i += 4 * 37) { sum += Math.pow(d[i + 1] / 255, 2.2); n++; }
+  return sum / n;
+}
+function applySurface(material, texture) {
+  material.map = texture; material.userData.worldUV = true;
+  material.color.multiplyScalar(1 / meanBrightness(texture.image));
+}
+
+// Floor: one copy covers 8 m x 8 m. Slab joints every 4 m, stains, hairline cracks, grit.
+const floorCanvas = concreteCanvas(1024, 1024, 4, 212, 170);
+{
+  const g = floorCanvas.getContext('2d');
+  for (let i = 0; i < 26; i++) blot(g, texRand() * 1024, texRand() * 1024, 20 + texRand() * 80, '25,24,22', 0.06 + texRand() * 0.14);
+  for (let i = 0; i < 8; i++) blot(g, texRand() * 1024, texRand() * 1024, 30 + texRand() * 70, '235,233,226', 0.08 + texRand() * 0.08);
+  for (let i = 0; i < 2600; i++) { g.fillStyle = texRand() > 0.5 ? 'rgba(20,20,20,0.28)' : 'rgba(245,245,240,0.22)'; g.fillRect(texRand() * 1024, texRand() * 1024, 1 + texRand() * 1.5, 1 + texRand() * 1.5); }
+  cracks(g, 1024, 1024, 6, 0.5);
+  for (const p of [0, 512]) { joint(g, p - 1.5, 0, 3, 1024); joint(g, 0, p - 1.5, 1024, 3); }
+  joint(g, 1022.5, 0, 1.5, 1024); joint(g, 0, 1022.5, 1024, 1.5);
+}
+applySurface(M.floor, asTexture(floorCanvas, 8, 8));
+M.floor.roughnessMap = asTexture(concreteCanvas(512, 512, 3, 222, 150), 11, 11, false); // patches worn smoother catch the light
+M.floor.roughness = 1;
+
+// Walls, posts and divider panels: one copy covers 8 m wide x 4 m tall, with the floor at the bottom edge.
+// Formwork panel joints, tie holes, grime along the base and streaks running down from the ceiling.
+const wallCanvas = concreteCanvas(1024, 512, 4, 214, 150);
+{
+  const g = wallCanvas.getContext('2d'), px = 128, rowOf = y => 512 - y * px;  // 128 pixels per metre
+  for (let i = 0; i < 12; i++) blot(g, texRand() * 1024, rowOf(texRand() * 2.8), 25 + texRand() * 70, '30,29,27', 0.05 + texRand() * 0.1);
+  for (let i = 0; i < 46; i++) {                    // streaks from the ceiling line down
+    const x = texRand() * 1024, wd = 3 + texRand() * 12, len = 40 + texRand() * 230, top = rowOf(2.8);
+    const grad = g.createLinearGradient(0, top, 0, top + len), c = texRand() > 0.3 ? '28,27,24' : '236,234,226';
+    grad.addColorStop(0, `rgba(${c},${0.1 + texRand() * 0.14})`); grad.addColorStop(1, `rgba(${c},0)`);
+    g.fillStyle = grad; g.fillRect(x, top, wd, len);
+  }
+  const grime = g.createLinearGradient(0, rowOf(0.45), 0, rowOf(0));
+  grime.addColorStop(0, 'rgba(30,28,24,0)'); grime.addColorStop(1, 'rgba(30,28,24,0.42)');
+  g.fillStyle = grime; g.fillRect(0, rowOf(0.45), 1024, 0.45 * px);
+  for (let x = 0; x < 1024; x += 256) joint(g, x - 1, 0, 2.5, 512);        // panel joints every 2 m
+  joint(g, 1022.5, 0, 1.5, 512); joint(g, 0, rowOf(1.4), 1024, 2.5);
+  for (let x = 0; x < 1024; x += 256) for (const dx of [0.4, 1.6]) for (const y of [0.5, 1.0, 1.9, 2.4]) { // tie holes
+    g.fillStyle = 'rgba(25,25,26,0.6)'; g.beginPath(); g.arc(x + dx * px, rowOf(y), 3.2, 0, Math.PI * 2); g.fill();
+  }
+  cracks(g, 1024, 512, 4, 0.4);
+}
+const wallTexture = asTexture(wallCanvas, 8, 4);
+applySurface(M.wall, wallTexture); applySurface(M.pillar, wallTexture);
+
+// Ceiling slab: formwork sheet lines and a few water stains.
+const ceilingCanvas = concreteCanvas(1024, 1024, 4, 216, 130);
+{
+  const g = ceilingCanvas.getContext('2d');
+  for (let i = 0; i < 7; i++) { const x = texRand() * 1024, y = texRand() * 1024, r = 30 + texRand() * 60; blot(g, x, y, r, '70,58,40', 0.16); blot(g, x, y, r * 0.7, '225,222,214', 0.12); }
+  for (let i = 0; i < 6; i++) joint(g, i * 1024 / 6 - 1, 0, 2, 1024);
+  for (let i = 0; i < 3; i++) joint(g, 0, i * 1024 / 3 - 1, 1024, 2);
+}
+applySurface(M.ceiling, asTexture(ceilingCanvas, 8, 8));
+
+// Painted lines: scuffed and chipped, not a flat colour.
+const paintCanvas = concreteCanvas(256, 256, 6, 222, 210);
+{
+  const g = paintCanvas.getContext('2d');
+  for (let i = 0; i < 500; i++) { g.fillStyle = 'rgba(60,60,60,0.35)'; g.fillRect(texRand() * 256, texRand() * 256, 1 + texRand() * 3, 1 + texRand() * 2); }
+}
+const paintTexture = asTexture(paintCanvas, 2, 2);
+applySurface(M.paint, paintTexture); applySurface(M.stripe, paintTexture);
+
+// Optional photo texture for the floor (see CONFIG.floorTexture). If a file can't be loaded, the generated concrete stays.
+if (CONFIG.floorTexture.color) {
+  const loader = new THREE.TextureLoader(), ft = CONFIG.floorTexture;
+  const load = (path, colour, apply) => path && loader.load(path, t => {
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1 / ft.tileMetres, 1 / ft.tileMetres); t.anisotropy = maxAniso;
+    if (colour) t.colorSpace = THREE.SRGBColorSpace;
+    apply(t); M.floor.needsUpdate = true;
+  }, undefined, () => console.warn('Could not load floor texture: ' + path));
+  load(ft.color, true, t => { M.floor.map = t; M.floor.color.setScalar(ft.brightness); });
+  load(ft.normal, false, t => { M.floor.normalMap = t; });
+  load(ft.roughness, false, t => { M.floor.roughnessMap = t; });
+}
+
+// Soft shapes used for shadows, stains and glows.
+function softCanvas(w, h, draw) { const c = canvasOf(w, h); draw(c.getContext('2d')); return c; }
+const blobTexture = new THREE.CanvasTexture(softCanvas(128, 128, g => {
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,1)'); grad.addColorStop(0.35, 'rgba(255,255,255,0.5)'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+}));
+const stainTexture = new THREE.CanvasTexture(softCanvas(128, 128, g => {
+  for (let i = 0; i < 7; i++) blot(g, 64 + (texRand() - 0.5) * 50, 64 + (texRand() - 0.5) * 50, 14 + texRand() * 26, '255,255,255', 0.55);
+}));
+const carShadowTexture = new THREE.CanvasTexture(softCanvas(128, 256, g => {
+  g.fillStyle = 'rgba(255,255,255,0.13)';
+  for (let i = 0; i < 16; i++) { g.beginPath(); g.roundRect(4 + i * 2.2, 4 + i * 2.2, 120 - i * 4.4, 248 - i * 4.4, 22); g.fill(); }
+}));
+const laneTexture = new THREE.CanvasTexture(softCanvas(64, 512, g => {
+  const n = tileNoise(64, 512, 3, 24), img = g.createImageData(64, 512);
+  for (let y = 0; y < 512; y++) for (let x = 0; x < 64; x++) {
+    const i = (y * 64 + x) * 4; img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+    img.data[i + 3] = 255 * Math.pow(Math.sin(Math.PI * x / 63), 1.5) * (0.35 + 0.65 * n[y * 64 + x]);
+  }
+  g.putImageData(img, 0, 0);
+}));
+laneTexture.wrapT = THREE.RepeatWrapping;
+// Dark marks that sit just above the floor. polygonOffset stops them flickering against the floor at a distance.
+const onFloor = (map, opacity) => new THREE.MeshBasicMaterial({ map, color: 0x000000, transparent: true, opacity, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+const carShadowMat = onFloor(carShadowTexture, 0.62), stainMat = onFloor(stainTexture, 0.5), laneMat = onFloor(laneTexture, 0.3);
+const flatGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);   // a 1 m square lying on the floor, facing up
+const glowGeo = new THREE.PlaneGeometry(1, 1).rotateX(Math.PI / 2);    // a 1 m square on the ceiling, facing down
+const glowMat = new THREE.MeshBasicMaterial({ map: blobTexture, color: 0xdfe8ff, transparent: true, opacity: CONFIG.fixtureGlow, blending: THREE.AdditiveBlending, depthWrite: false });
+
+// Lays a surface picture out in real-world metres, so concrete runs continuously from one box to the next.
+function worldUV(geo, x, y, z) {
+  const p = geo.attributes.position, uv = geo.attributes.uv;
+  for (let i = 0; i < p.count; i++) {
+    const face = Math.floor(i / 4);                       // a box's faces come in this order: +x, -x, +y, -y, +z, -z
+    const wx = p.getX(i) + x, wy = p.getY(i) + y, wz = p.getZ(i) + z;
+    if (face < 2) uv.setXY(i, wz + x * 0.37, wy);          // faces looking along x (the 0.37 shifts the pattern so walls don't all match)
+    else if (face < 4) uv.setXY(i, wx, wz);                // floor and ceiling faces
+    else uv.setXY(i, wx + z * 0.37, wy);                   // faces looking along z
+  }
+}
+
+let target = scene;                                         // where box() and boxes() put new pieces: one of the levels, or the scene itself
+function box(w, h, d, m, x, y, z, parent = target) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  if (m.userData.worldUV) worldUV(geo, x, y, z);
+  const b = new THREE.Mesh(geo, m); b.position.set(x, y, z); parent.add(b); return b;
+}
+// Draws many copies of one box in a single step, which is much cheaper for the headset than separate boxes.
+function boxes(list, material, parent = target) {          // each entry: [x, y, z, width, height, depth]
+  const mesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, list.length), d = new THREE.Object3D();
+  list.forEach(([x, y, z, w, h, dp], i) => { d.position.set(x, y, z); d.scale.set(w, h, dp); d.updateMatrix(); mesh.setMatrixAt(i, d.matrix); });
+  parent.add(mesh); return mesh;
+}
+
+// ================= Layout shared by both levels =================
+const L = CONFIG.garageLength, H = CONFIG.ceiling, zFront = 8, zBack = zFront - L, zMid = (zFront + zBack) / 2;
+const DROP = CONFIG.levels.drop;
+// Bays 2.6 m wide on both sides of a 7 m aisle
+const bayZ = [];
+for (let z = zFront - 1.5; z > zBack + 1; z -= 2.6) bayZ.push(z);
+// Bay dividers: one every 3 bays, on the painted bay lines.
+// The posts are the same in every condition. The panel behind each post is added in build():
+// solid concrete (high concealment) or an open metal grate (low concealment).
+const DIV = { xNear: 3.6, xFar: 10.35, post: 0.4, thick: 0.2 };  // metres from the centre line
+const GRATE = { spacing: 0.2, bar: 0.03, rail: 0.05 };           // gap between uprights, bar and rail thickness
+const dividerZ = [];
+for (let z = zFront - 2.8; z > zBack + 2; z -= 7.8) dividerZ.push(z);
+const grateMat = mat(0xa9b0b6, { metalness: 0.3, roughness: 0.6 });
+const barGeo = new THREE.BoxGeometry(1, 1, 1);
+
+// The ramp lane runs along the right-hand side of the building, from x0 to x1.
+// Each level has a cross-aisle (three bays wide, between two bay dividers) through to it:
+// the upper one near the far end, the lower one near the front. The ramp between them runs back toward the start.
+const LANE = { x0: 10.65, x1: 17.65, zFar: -49.4, zTop: -41.6, zBottom: -2.6, zNear: 5.2 };   // zFar-zTop: upper landing, zTop-zBottom: the slope, zBottom-zNear: lower landing
+LANE.xMid = (LANE.x0 + LANE.x1) / 2;
+const rampY = z => -DROP * THREE.MathUtils.clamp((z - LANE.zTop) / (LANE.zBottom - LANE.zTop), 0, 1);   // height of the lane floor at position z
+const LEVELS = CONFIG.levels.names.map((name, i) => ({
+  name, y: -i * DROP, seed: CONFIG.levels.carSeeds[i], farExit: CONFIG.levels.farExit[i],
+  cross: i === 0 ? [LANE.zFar, LANE.zTop] : [LANE.zBottom, LANE.zNear],     // where this level's cross-aisle is, along z
+}));
+const inCross = (level, side, z) => side === 1 && z > level.cross[0] + 0.01 && z < level.cross[1] - 0.01;   // is this right-hand spot inside the cross-aisle?
+
+// Real light sources over the aisle (kept few so the headset stays fast).
+// There is one set: it lights whichever level you are on, and moves when you change level.
+const lamps = [];
+for (const z of [3, -6, -16, -26, -36, -46]) {
+  const l = new THREE.PointLight(0xe8f0ff, 0, 18, 1.4); l.position.set(0, H - 0.2, z); scene.add(l); lamps.push(l);
+}
+const hemi = new THREE.HemisphereLight(0xdfe8ff, 0x3a3a3a, 1); scene.add(hemi);
+
+// EXIT lettering: lit (green and glowing) when exits are open, dark when they are blocked.
+const exitTexture = new THREE.CanvasTexture(softCanvas(256, 72, g => {
+  g.fillStyle = 'rgb(28,150,74)'; g.fillRect(0, 0, 256, 72);
+  g.fillStyle = '#ffffff'; g.font = 'bold 56px Arial, Helvetica, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('EXIT', 128, 39);
+}));
+exitTexture.colorSpace = THREE.SRGBColorSpace;
+M.exitOn = new THREE.MeshStandardMaterial({ map: exitTexture, emissiveMap: exitTexture, emissive: 0xffffff, emissiveIntensity: 1.2 });
+M.exitOff = new THREE.MeshStandardMaterial({ map: exitTexture, color: 0x3a3f45, roughness: 0.9 });
+
+let detailSeed = 99;
+const detailRand = () => (detailSeed = (detailSeed * 16807) % 2147483647) / 2147483647;
+const metalDark = mat(0x2c2f33, { metalness: 0.4, roughness: 0.6 }), metalGrey = mat(0x7f858b, { metalness: 0.4, roughness: 0.5 });
+const stopMat = mat(0x9a9a97);
+
+// Yellow-and-black hazard bands around the base of each post.
+const hazardTexture = new THREE.CanvasTexture(softCanvas(128, 256, g => {
+  g.fillStyle = 'rgb(214,176,40)'; g.fillRect(0, 0, 128, 256);
+  g.fillStyle = 'rgb(22,22,22)';
+  for (let k = -256; k < 400; k += 64) { g.beginPath(); g.moveTo(0, k); g.lineTo(128, k + 128); g.lineTo(128, k + 160); g.lineTo(0, k + 32); g.fill(); }
+  for (let i = 0; i < 700; i++) { g.fillStyle = `rgba(120,118,112,${0.2 + detailRand() * 0.4})`; g.fillRect(detailRand() * 128, detailRand() * 256, 1 + detailRand() * 4, 1 + detailRand() * 3); }
+}));
+hazardTexture.colorSpace = THREE.SRGBColorSpace;
+const bandMat = new THREE.MeshStandardMaterial({ map: hazardTexture, roughness: 0.85 });
+
+// Stencilled level name, drawn once for each level.
+function levelSignMaterial(name) {
+  const texture = new THREE.CanvasTexture(softCanvas(512, 256, g => {
+    g.fillStyle = 'rgba(38,66,112,0.9)'; g.font = 'bold 200px Arial, Helvetica, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(name, 256, 136);
+    g.globalCompositeOperation = 'destination-out';
+    for (let i = 0; i < 1400; i++) { g.fillStyle = `rgba(0,0,0,${0.3 + detailRand() * 0.5})`; g.fillRect(detailRand() * 512, detailRand() * 256, 1 + detailRand() * 5, 1 + detailRand() * 3); }
+  }));
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.MeshStandardMaterial({ map: texture, transparent: true, roughness: 0.95 });
+}
+laneTexture.repeat.set(1, L / 10);
+
+// Night city seen over the low side walls (shown only when entrapment is low and no outside photo is set).
+const skylineTexture = new THREE.CanvasTexture(softCanvas(2048, 1024, g => {
+  const horizon = 628, ground = 850;                        // pixel rows: eye level, and street level below this parking deck
+  const sky = g.createLinearGradient(0, 0, 0, horizon);
+  sky.addColorStop(0, 'rgb(4,6,11)'); sky.addColorStop(0.7, 'rgb(10,14,24)'); sky.addColorStop(1, 'rgb(30,34,48)');
+  g.fillStyle = sky; g.fillRect(0, 0, 2048, horizon); g.fillStyle = 'rgb(5,6,9)'; g.fillRect(0, horizon, 2048, 1024 - horizon);
+  const row = (x0, minW, maxW, minH, maxH, shade, pitch, lit) => {  // one row of buildings with some lit windows
+    for (let x = x0; x < 2048;) {
+      const wd = Math.min(2048 - x, minW + detailRand() * (maxW - minW)), top = horizon - (minH + detailRand() * (maxH - minH));
+      g.fillStyle = shade; g.fillRect(x, top, wd - 6, ground - top);
+      for (let wy = top + pitch * 0.4; wy < ground - pitch; wy += pitch) for (let wx = x + pitch * 0.3; wx < x + wd - pitch * 0.7; wx += pitch * 0.62) {
+        if (detailRand() > lit) continue;
+        g.fillStyle = detailRand() > 0.35 ? `rgba(255,212,150,${0.35 + detailRand() * 0.5})` : `rgba(190,214,255,${0.3 + detailRand() * 0.45})`;
+        g.fillRect(wx, wy, pitch * 0.34, pitch * 0.44);
+      }
+      x += wd;
+    }
+  };
+  row(0, 90, 260, 90, 380, 'rgb(13,17,27)', 38, 0.2);      // distant buildings
+  row(0, 260, 520, 30, 300, 'rgb(8,10,16)', 96, 0.16);     // nearer buildings
+  for (let x = 60; x < 2048; x += 230) { blot(g, x, ground - 40, 46, '255,196,120', 0.35); g.fillStyle = 'rgb(255,226,170)'; g.fillRect(x - 2, ground - 42, 4, 4); } // street lamps
+}));
+skylineTexture.colorSpace = THREE.SRGBColorSpace; skylineTexture.wrapS = THREE.RepeatWrapping; skylineTexture.repeat.set(3, 1);
+const skylineMat = new THREE.MeshBasicMaterial({ map: skylineTexture, fog: false });
+const skylines = [-1, 1].map(side => {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(L + 120, 30), skylineMat);
+  m.position.set(side * 45, 5, zMid); m.rotation.y = -side * Math.PI / 2; return m;
+});
+
+// ================= One parking level (built once for each level; identical in every condition) =================
+// Everything in here is positioned as if the level's floor were at height 0. The whole level is then moved to its real height.
+function buildLevel(level) {
+  const g = level.group = new THREE.Group(); g.position.y = level.y; scene.add(g);
+  level.dyn = new THREE.Group(); g.add(level.dyn);              // holds this level's condition-dependent parts
+  target = g;
+  box(21, 0.1, L, M.floor, 0, -0.05, zMid);
+  box(21, 0.2, L, M.ceiling, 0, H + 0.1, zMid);
+  box(21, H, 0.3, M.wall, 0, H / 2, zFront);                      // wall at the front end
+  for (let z = zFront - 2; z > zBack; z -= 5) box(0.12, 0.01, 2.5, M.paint, 0, 0.006, z); // centre line
+  for (const side of [-1, 1]) for (const z of bayZ) if (!inCross(level, side, z - 1.3)) box(5, 0.01, 0.1, M.paint, side * 6, 0.006, z - 1.3);   // bay lines
+  box(0.15, 0.1, level.cross[1] - level.cross[0], M.floor, 10.575, -0.05, (level.cross[0] + level.cross[1]) / 2);   // floor strip joining the cross-aisle to the ramp lane
+  for (const side of [-1, 1]) for (const z of dividerZ) box(DIV.post, H, DIV.post, M.pillar, side * DIV.xNear, H / 2, z);   // divider posts
+  // Far end wall with a 7 m opening for the exit ramp
+  if (level.farExit) {
+    box(7, H, 0.3, M.wall, -7, H / 2, zBack); box(7, H, 0.3, M.wall, 7, H / 2, zBack);
+    box(7, 0.6, 0.3, M.wall, 0, H - 0.3, zBack);
+    // Exit ramp up and out, beyond the opening
+    const ramp = box(7, 0.2, 14, M.floor, 0, 1.6, zBack - 7); ramp.rotation.x = -0.23;
+    box(7, 0.02, 0.3, M.stripe, 0, 0.012, zBack + 0.6); // yellow stripe at the ramp mouth
+  } else box(21, H, 0.3, M.wall, 0, H / 2, zBack);    // no exit on this level: solid wall at the far end
+
+  // Ceiling fixtures (tubes) over the aisle and bays
+  level.fixtures = [];
+  for (let z = zFront - 3; z > zBack + 1; z -= 5) for (const x of [-6, 0, 6]) level.fixtures.push(box(0.15, 0.06, 1.3, M.tubeOn, x, H - 0.03, z));
+  boxes(level.fixtures.map(f => [f.position.x, H - 0.0175, f.position.z, 0.3, 0.035, 1.5]), metalDark);   // housings, so they read as fixtures
+
+  // Exit signs above the exit ramp and the stairwell door
+  const stairSign = box(0.9, 0.3, 0.08, M.exitOn, -9.9, 2.4, -14); stairSign.rotation.y = Math.PI / 2;
+  level.exitSigns = [stairSign];
+  if (level.farExit) level.exitSigns.push(box(1.2, 0.35, 0.08, M.exitOn, 0, H - 0.45, zBack + 0.25));   // sign over the exit ramp
+  // Stair core: a full-height wall behind the stairwell door, so the door and its EXIT sign sit on a real wall
+  // even when the sides of the garage are open. Delete this line to go back to a door in the low side wall.
+  box(0.34, H, 5.2, M.wall, -10.5, H / 2, -14);
+
+  // Two sprinkler pipes along the ceiling, with hangers every 4 m.
+  const hangers = [];
+  for (const x of [-1.9, 1.9]) {
+    const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, L - 1, 10).rotateX(Math.PI / 2), metalGrey);
+    pipe.position.set(x, H - 0.15, zMid); g.add(pipe);
+    for (let z = zFront - 2; z > zBack + 1; z -= 4) hangers.push([x, H - 0.05, z, 0.025, 0.1, 0.025]);
+  }
+  boxes(hangers, metalDark);
+
+  // Concrete wheel stops at the back of every bay.
+  const stops = [];
+  for (const side of [-1, 1]) for (const z of bayZ) if (!inCross(level, side, z)) stops.push([side * 8.85, 0.05, z, 0.16, 0.1, 1.7]);
+  boxes(stops, stopMat);
+
+  // Hazard bands around the base of each post.
+  const bands = [];
+  for (const side of [-1, 1]) for (const z of dividerZ) bands.push([side * DIV.xNear, 0.45, z, DIV.post + 0.012, 0.9, DIV.post + 0.012]);
+  boxes(bands, bandMat);
+
+  // Level name: large on the front wall, small on the aisle side of each post.
+  const levelMat = levelSignMaterial(level.name);
+  const wallSign = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 1.1), levelMat);
+  wallSign.position.set(0, 1.65, zFront - 0.16); wallSign.rotation.y = Math.PI; g.add(wallSign);
+  const postSigns = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.34, 0.17), levelMat, dividerZ.length * 2), signHelper = new THREE.Object3D();
+  let signCount = 0;
+  for (const side of [-1, 1]) for (const z of dividerZ) {
+    signHelper.position.set(side * (DIV.xNear - DIV.post / 2 - 0.004), 1.55, z); signHelper.rotation.set(0, -side * Math.PI / 2, 0);
+    signHelper.updateMatrix(); postSigns.setMatrixAt(signCount++, signHelper.matrix);
+  }
+  g.add(postSigns);
+
+  // Floor wear: darker lanes where tyres run along the aisle, and oil stains in the bays.
+  for (const x of [-1.7, 1.7]) {
+    const lane = new THREE.Mesh(new THREE.PlaneGeometry(1.4, L).rotateX(-Math.PI / 2), laneMat); lane.position.set(x, 0.004, zMid); g.add(lane);
+  }
+  const stainSpots = [];
+  for (const side of [-1, 1]) for (const z of bayZ) if (detailRand() < 0.65 && !inCross(level, side, z)) stainSpots.push([side * (5 + detailRand() * 2.4), z + (detailRand() - 0.5) * 0.8, 0.5 + detailRand() * 0.8, detailRand() * Math.PI]);
+  const stains = new THREE.InstancedMesh(flatGeo, stainMat, stainSpots.length), stainHelper = new THREE.Object3D();
+  stainSpots.forEach(([x, z, size, turn], i) => { stainHelper.position.set(x, 0.003, z); stainHelper.rotation.y = turn; stainHelper.scale.set(size, 1, size * 1.3); stainHelper.updateMatrix(); stains.setMatrixAt(i, stainHelper.matrix); });
+  g.add(stains);
+}
+LEVELS.forEach(buildLevel);
+target = scene;
+
+// ================= Ramp lane between the levels (identical in every condition) =================
+// A solid shape described from the side as [z, y] corner points, then pushed across from x0 to x1.
+// faceMat covers its two big side faces, edgeMat its top, bottom and ends. floorAt(z) says where the floor is, so wall grime sits at the bottom.
+function sideProfile(points, x0, x1, faceMat, edgeMat, floorAt, parent = target) {
+  const shape = new THREE.Shape(points.map(([z, y]) => new THREE.Vector2(-z, y)));
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: x1 - x0, bevelEnabled: false }).rotateY(Math.PI / 2).translate(x0, 0, 0);
+  const p = geo.attributes.position, n = geo.attributes.normal, uv = geo.attributes.uv;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    if (Math.abs(n.getX(i)) > 0.5) uv.setXY(i, z + x * 0.37, y - floorAt(z)); else uv.setXY(i, x, z);
+  }
+  const mesh = new THREE.Mesh(geo, [faceMat, edgeMat]); parent.add(mesh); return mesh;
+}
+// The ramp and its two flat landings: one slab, 0.3 m thick, open underneath so the lower level can still see out past it.
+sideProfile([[LANE.zFar, 0], [LANE.zTop, 0], [LANE.zBottom, -DROP], [LANE.zNear, -DROP], [LANE.zNear, -DROP - 0.3], [LANE.zBottom, -DROP - 0.3], [LANE.zTop, -0.3], [LANE.zFar, -0.3]],
+  LANE.x0, LANE.x1, M.wall, M.floor, z => rampY(z) - 0.3);
+box(LANE.x1 - LANE.x0, 0.3, LANE.zBottom - LANE.zFar, M.floor, LANE.xMid, -DROP - 0.15, (LANE.zFar + LANE.zBottom) / 2);   // floor underneath the ramp
+const rampPosts = [];                                        // posts holding the ramp up, in line with the divider posts
+for (const z of dividerZ) {
+  const clear = DROP + rampY(z) - 0.3;                       // floor-to-slab height under the ramp at this point
+  if (z > LANE.zTop && z < LANE.zBottom && clear > 0.5) for (const x of [LANE.x0 + 0.2, LANE.x1 - 0.2]) rampPosts.push([x, -DROP + clear / 2, z, DIV.post, clear, DIV.post]);
+}
+boxes(rampPosts, M.pillar);
+box(LANE.x1 + 0.3 - 10.5, 0.2, LANE.zNear - LANE.zFar + 0.6, M.ceiling, (LANE.x1 + 0.3 + 10.5) / 2, H + 0.1, (LANE.zNear + LANE.zFar) / 2);   // roof over the lane
+// Light fixtures hang over the lane at the same height above the floor as on the levels, on rods from the roof.
+const laneFixtures = [], laneRods = [];
+for (let z = LANE.zFar + 3.4; z < LANE.zNear; z += 5) {
+  laneFixtures.push(box(0.15, 0.06, 1.3, M.tubeOn, LANE.xMid, rampY(z) + H - 0.03, z));
+  if (-rampY(z) > 0.15) for (const dz of [-0.5, 0.5]) laneRods.push([LANE.xMid, H + rampY(z) / 2, z + dz, 0.025, -rampY(z), 0.025]);
+}
+boxes(laneFixtures.map(f => [f.position.x, f.position.y + 0.0125, f.position.z, 0.3, 0.035, 1.5]), metalDark);
+boxes(laneRods, metalDark);
+// Yellow arrows painted on the lane floor, showing the way down to P1 (identical in every condition).
+// Each arrow: [x, z of its centre, direction x, direction z]. They lie on the floor wherever it is (flat landings or the slope).
+const ARROW = { length: 3.0, shaft: 0.4, head: 1.2, headLength: 1.0, lift: 0.009 };   // metres; lift = height above the floor
+const ARROWS = [
+  [LANE.xMid, -45.5, 0, 1],                                       // upper landing: turn right, down the ramp
+  [LANE.xMid, LANE.zTop + (LANE.zBottom - LANE.zTop) / 3, 0, 1],  // on the ramp, a third of the way down: straight on
+  [LANE.xMid, LANE.zTop + (LANE.zBottom - LANE.zTop) * 2 / 3, 0, 1],   // two thirds of the way down: straight on
+  [LANE.xMid - 0.8, 1.3, -1, 0],                                  // lower landing: turn off the ramp into P1
+];
+function arrowGeometry(cx, cz, dx, dz) {
+  const { length: Lg, shaft, head, headLength } = ARROW, t = Lg / 2;   // outline along the arrow (a) and across it (b)
+  const outline = [[-t, -shaft / 2], [t - headLength, -shaft / 2], [t - headLength, -head / 2], [t, 0], [t - headLength, head / 2], [t - headLength, shaft / 2], [-t, shaft / 2]];
+  const faces = THREE.ShapeUtils.triangulateShape(outline.map(([a, b]) => new THREE.Vector2(a, b)), []);
+  const pos = [], uv = [];
+  for (const [a, b] of outline) {
+    const x = cx + dx * a - dz * b, z = cz + dz * a + dx * b;
+    pos.push(x, rampY(z) + ARROW.lift, z); uv.push(x, z);          // floor height of the lane at this point; paint laid out in metres
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  const index = faces.flat(), p = i => new THREE.Vector3().fromArray(pos, i * 3);
+  for (let i = 0; i < index.length; i += 3) {                      // wind every triangle so it faces up
+    const n = new THREE.Vector3().subVectors(p(index[i + 1]), p(index[i])).cross(new THREE.Vector3().subVectors(p(index[i + 2]), p(index[i])));
+    if (n.y < 0) [index[i + 1], index[i + 2]] = [index[i + 2], index[i + 1]];
+  }
+  geo.setIndex(index); geo.computeVertexNormals();
+  return geo;
+}
+for (const [x, z, dx, dz] of ARROWS) scene.add(new THREE.Mesh(arrowGeometry(x, z, dx, dz), M.stripe));
+
+const laneLamps = [LANE.zFar + 3.9, (LANE.zTop + LANE.zBottom) / 2, LANE.zNear - 3.9].map(z => {
+  const l = new THREE.PointLight(0xe8f0ff, 0, 18, 1.4); l.position.set(LANE.xMid, rampY(z) + H - 0.2, z); scene.add(l); return l;
+});
+
+// ================= Search targets (identical in every condition) =================
+// Six identical placards for the search task ("There are 6 ... find them all"). They light themselves and ignore the fog,
+// so each one looks the same in both conditions, and they sit on surfaces whose sightlines don't change with the cues.
+const targetCanvas = softCanvas(256, 256, g => {                  // a purple star on a white card
+  g.fillStyle = '#ffffff'; g.beginPath(); g.roundRect(6, 6, 244, 244, 18); g.fill();
+  g.strokeStyle = '#9a9a9a'; g.lineWidth = 6; g.stroke();
+  g.fillStyle = 'rgb(122,46,190)'; g.beginPath();
+  for (let i = 0; i < 10; i++) { const r = i % 2 ? 46 : 104, a = -Math.PI / 2 + i * Math.PI / 5; g.lineTo(128 + r * Math.cos(a), 140 + r * Math.sin(a)); }
+  g.closePath(); g.fill();
+});
+const targetTexture = new THREE.CanvasTexture(targetCanvas); targetTexture.colorSpace = THREE.SRGBColorSpace; targetTexture.anisotropy = maxAniso;
+const targetMat = new THREE.MeshBasicMaterial({ map: targetTexture, fog: false });
+const targetGeo = new THREE.PlaneGeometry(0.3, 0.3);             // 30 cm square, facing +z before it is turned
+// Each target: [name, what it is attached to, x, y, z, turn about y], in the order they come along the route. Edit positions here.
+// y is the height above that level's floor (the ramp target hangs on the upper level's wall, 0.6 m above its floor).
+const TARGETS = [
+  ['T1', LEVELS[0].group, -DIV.xNear, 2.05, dividerZ[2] + DIV.post / 2 + 0.005, 0],               // P2: divider post, facing the walker
+  ['T2', LEVELS[0].group, DIV.xNear, 2.05, dividerZ[5] + DIV.post / 2 + 0.005, 0],                // P2: divider post further down
+  ['T3', scene, LANE.x1 - 0.005, 0.7, -45.5, -Math.PI / 2],                                     // upper cross-aisle: low on the lane's outer wall, ahead
+  ['T4', LEVELS[0].group, 10.655, 0.6, (LANE.zTop + LANE.zBottom) / 2, Math.PI / 2],            // mid-ramp: on the inner wall, facing the ramp
+  ['T5', LEVELS[1].group, -DIV.xNear, 2.05, dividerZ[3] + DIV.post / 2 + 0.005, 0],               // P1: divider post
+  ['T6', LEVELS[1].group, DIV.xNear, 2.05, dividerZ[6] + DIV.post / 2 + 0.005, 0],                // P1: divider post near the far end
+].map(([name, parent, x, y, z, turn]) => {
+  const m = new THREE.Mesh(targetGeo, targetMat.clone());           // each its own material, so its brightness can be set
+  m.name = name; m.position.set(x, y, z); m.rotation.y = turn; parent.add(m); return m;
+});
+
+// ================= Condition-dependent parts =================
+const cond = { lighting: 'high', entrapment: 'low', concealment: 'low' };
+const sharedDyn = new THREE.Group(); scene.add(sharedDyn);   // condition-dependent parts that belong to neither level (the ramp lane's outer walls)
+let flickerLamp = null;
+let seed = 5;
+const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+// ---- Vehicle shapes (built once and reused; same length, width and height as before) ----
+// Each body is "lofted": a list of cross-sections from tail to nose, joined into one smooth skin.
+// A cross-section is a few numbers, all in metres:
+//   s = position along the vehicle (the front is +), bottom = height of the underside, belt = height of the window line,
+//   top = height of the roof or bonnet, w = half-width at the doors, wTop = half-width at the top,
+//   glass = which parts of the skin between this section and the next are glass ('side', 'screen' or 'both').
+function loftBody(sections) {
+  const RING = 22, pos = [], uv = [], paintIdx = [], glassIdx = [];
+  const s0 = sections[0].s, len = sections[sections.length - 1].s - s0, mix = (a, b, t) => a + (b - a) * t;
+  for (const c of sections) {
+    const h = c.top - c.belt;
+    const half = [                                             // right-hand half of the cross-section, underside to roof
+      [0, c.bottom], [c.w * 0.8, c.bottom], [c.w * 0.96, c.bottom + 0.05], [c.w, c.bottom + 0.14],
+      [c.w, mix(c.bottom, c.belt, 0.55)], [c.w * 0.985, c.belt - 0.04], [c.w * 0.95, c.belt],
+      [mix(c.w * 0.95, c.wTop, 0.12), c.belt + h * 0.06], [mix(c.w * 0.95, c.wTop, 0.9), c.belt + h * 0.86],
+      [c.wTop * 0.94, c.belt + h * 0.96], [c.wTop * 0.6, c.top], [0, c.top + 0.012],
+    ];
+    for (let k = 0; k < RING; k++) {                           // mirror it to make the full loop
+      const j = k <= 11 ? k : RING - k, side = k <= 11 ? 1 : -1;
+      pos.push(half[j][0] * side, half[j][1], c.s); uv.push((c.s - s0) / len, j / 11);
+    }
+  }
+  for (let i = 0; i < sections.length - 1; i++) {
+    const g = sections[i].glass || '', sideGlass = g === 'side' || g === 'both', screenGlass = g === 'screen' || g === 'both';
+    for (let k = 0; k < RING; k++) {
+      const j = k < 11 ? k : 21 - k;                           // which strip of the skin this is (7 = side windows, 9 and 10 = windscreen)
+      const a = i * RING + k, b = i * RING + (k + 1) % RING, c = (i + 1) * RING + (k + 1) % RING, d = (i + 1) * RING + k;
+      ((sideGlass && j === 7) || (screenGlass && j >= 9) ? glassIdx : paintIdx).push(a, b, c, a, c, d);
+    }
+  }
+  for (const [c, first, isRear] of [[sections[0], 0, true], [sections[sections.length - 1], (sections.length - 1) * RING, false]]) {
+    const n = pos.length / 3, u = isRear ? 0 : 1;            // close each end with a flat cap in plain body colour
+    for (let k = 0; k < RING; k++) { pos.push(pos[(first + k) * 3], pos[(first + k) * 3 + 1], c.s); uv.push(u, 0.9); }
+    pos.push(0, (c.bottom + c.top) / 2, c.s); uv.push(u, 0.9);
+    for (let k = 0; k < RING; k++) paintIdx.push(n + RING, n + (isRear ? (k + 1) % RING : k), n + (isRear ? k : (k + 1) % RING));
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex([...paintIdx, ...glassIdx]); geo.addGroup(0, paintIdx.length, 0); geo.addGroup(paintIdx.length, glassIdx.length, 1);
+  geo.computeVertexNormals();
+  return geo;
+}
+// Dark details painted onto the body colour: wheel wells, sills, door gaps, handles and road grime near the ground.
+function bodyTexture(guide) {
+  const W = 1024, Hh = 512, cv = canvasOf(W, Hh), g = cv.getContext('2d'), img = g.createImageData(W, Hh);
+  const { s0, len, bottom, belt, wheelS, wheelR, seams, handles } = guide;
+  const heights = [bottom, bottom, bottom + 0.05, bottom + 0.14, bottom + (belt - bottom) * 0.55, belt - 0.04, belt];
+  for (let py = 0; py < Hh; py++) {
+    const f = (1 - (py + 0.5) / Hh) * 11, j = Math.min(5, Math.floor(f)), onSide = f <= 6;
+    const y = onSide ? heights[j] + (heights[j + 1] - heights[j]) * (f - j) : belt + 1;
+    for (let px = 0; px < W; px++) {
+      const s = s0 + (px + 0.5) / W * len; let shade = 255;
+      if (onSide) {
+        shade *= 0.78 + 0.22 * Math.min(1, Math.max(0, (y - bottom) / 0.4));                          // grime low down
+        if (y < bottom + 0.075) shade = 52;                                                           // dark sill
+        for (const k of seams) if (Math.abs(s - k) < 0.006 && y > bottom + 0.09 && y < belt - 0.02) shade *= 0.3;   // door gaps
+        for (const [hs, hy] of handles) if (Math.abs(s - hs) < 0.075 && Math.abs(y - hy) < 0.016) shade = 40;      // door handles
+        for (const ws of wheelS) if (Math.hypot(s - ws, y - wheelR) < wheelR + 0.065) shade = 12;                   // wheel wells
+      }
+      const o = (py * W + px) * 4; img.data[o] = img.data[o + 1] = img.data[o + 2] = shade; img.data[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = maxAniso; return t;
+}
+// An alloy wheel, drawn once and used on every wheel.
+const rimTexture = new THREE.CanvasTexture(softCanvas(256, 256, g => {
+  g.fillStyle = '#0b0b0c'; g.fillRect(0, 0, 256, 256);
+  const metal = g.createRadialGradient(128, 128, 10, 128, 128, 124); metal.addColorStop(0, '#d9dde1'); metal.addColorStop(0.75, '#a9aeb4'); metal.addColorStop(1, '#e4e7ea');
+  g.fillStyle = metal; g.beginPath(); g.arc(128, 128, 124, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#101113';                                     // the gaps between five spokes
+  for (let i = 0; i < 5; i++) {
+    const a = i * Math.PI * 2 / 5 + 0.63, r1 = 40, r2 = 104, wd = 0.42;
+    g.beginPath(); g.moveTo(128 + Math.cos(a - wd * 0.45) * r1, 128 + Math.sin(a - wd * 0.45) * r1);
+    g.lineTo(128 + Math.cos(a - wd) * r2, 128 + Math.sin(a - wd) * r2); g.arc(128, 128, r2, a - wd, a + wd);
+    g.lineTo(128 + Math.cos(a + wd * 0.45) * r1, 128 + Math.sin(a + wd * 0.45) * r1); g.closePath(); g.fill();
+  }
+  g.fillStyle = '#8f949a'; g.beginPath(); g.arc(128, 128, 24, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#2a2c2f'; for (let i = 0; i < 5; i++) { const a = i * Math.PI * 2 / 5; g.beginPath(); g.arc(128 + Math.cos(a) * 15, 128 + Math.sin(a) * 15, 3, 0, Math.PI * 2); g.fill(); }
+}));
+rimTexture.colorSpace = THREE.SRGBColorSpace;
+// A small imaginary room with strip lights overhead. It is never shown; paint, glass and chrome reflect it so they look glossy.
+const garageReflection = (() => {
+  const room = new THREE.Scene();
+  room.add(new THREE.Mesh(new THREE.BoxGeometry(14, 5, 14), new THREE.MeshBasicMaterial({ color: 0x121418, side: THREE.BackSide })));
+  const strip = new THREE.MeshBasicMaterial({ color: 0xffffff }); strip.color.setScalar(6);
+  for (const x of [-2.4, 2.4]) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.05, 7), strip); m.position.set(x, 2.3, 0); room.add(m); }
+  const pmrem = new THREE.PMREMGenerator(renderer), texture = pmrem.fromScene(room, 0.04).texture; pmrem.dispose();
+  return texture;
+})();
+const CAR_SHINE = 0.7;                                         // strength of those reflections; they also dim with the lighting cue
+const glassMat = new THREE.MeshStandardMaterial({ color: 0x0a0d12, roughness: 0.06, envMap: garageReflection });
+const rimMat = new THREE.MeshStandardMaterial({ map: rimTexture, roughness: 0.35, metalness: 0.7, envMap: garageReflection });
+const lampMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.2, metalness: 0.5, envMap: garageReflection });   // headlight lenses and number plates
+const tailMat = new THREE.MeshStandardMaterial({ color: 0x7a1010, roughness: 0.2, envMap: garageReflection });
+const tyreMat = mat(0x0f1011, { roughness: 0.95 });
+const shinyMats = [glassMat, rimMat, lampMat, tailMat];
+
+const LENS = 0x97a0a8, PLATE = 0xbdbdb4;
+function part(w, h, d, x, y, z, hex) {                         // a small box-shaped piece; hex gives it its own colour
+  const geo = new THREE.BoxGeometry(w, h, d).translate(x, y, z);
+  if (hex !== undefined) { const c = new THREE.Color(hex), n = geo.attributes.position.count, cols = new Float32Array(n * 3); for (let i = 0; i < n; i++) cols.set([c.r, c.g, c.b], i * 3); geo.setAttribute('color', new THREE.BufferAttribute(cols, 3)); }
+  return geo;
+}
+const joined = parts => mergeGeometries(parts.map(p => (p.index ? p.toNonIndexed() : p)));
+function buildVehicle({ sections, guide, wheelWidth, dark, light, tail, shadow }) {
+  const r = guide.wheelR, halfTrack = sections[3].w + 0.015 - wheelWidth / 2, tyres = [], rims = [];
+  for (const side of [-1, 1]) for (const z of guide.wheelS) {
+    tyres.push(new THREE.CylinderGeometry(r, r, wheelWidth, 28).rotateZ(Math.PI / 2).translate(side * halfTrack, r, z));
+    rims.push(new THREE.CircleGeometry(r * 0.7, 28).rotateY(side * Math.PI / 2).translate(side * (halfTrack + wheelWidth / 2 + 0.002), r, z));
+  }
+  return {
+    body: loftBody(sections), texture: bodyTexture(guide), dark: joined([...tyres, ...dark]), rims: joined(rims), light: joined(light), tail: joined(tail),
+    shadow: new THREE.PlaneGeometry(shadow[0], shadow[1]).rotateX(-Math.PI / 2).translate(0, 0.0125, 0), paints: new Map(),
+  };
+}
+const SEDAN = buildVehicle({   // low: easy to see over
+  sections: [
+    { s: -2.25, bottom: 0.34, belt: 0.80, top: 0.84, w: 0.74, wTop: 0.62 },
+    { s: -2.20, bottom: 0.29, belt: 0.86, top: 0.895, w: 0.84, wTop: 0.72 },
+    { s: -2.05, bottom: 0.27, belt: 0.88, top: 0.92, w: 0.89, wTop: 0.76 },
+    { s: -1.65, bottom: 0.25, belt: 0.90, top: 0.94, w: 0.90, wTop: 0.76, glass: 'screen' },   // rear window
+    { s: -0.95, bottom: 0.25, belt: 0.90, top: 1.355, w: 0.90, wTop: 0.60, glass: 'side' },
+    { s: -0.33, bottom: 0.25, belt: 0.90, top: 1.358, w: 0.90, wTop: 0.60 },                    // pillar between the doors
+    { s: -0.27, bottom: 0.25, belt: 0.90, top: 1.358, w: 0.90, wTop: 0.60, glass: 'side' },
+    { s: 0.35, bottom: 0.25, belt: 0.90, top: 1.355, w: 0.90, wTop: 0.60, glass: 'both' },      // windscreen
+    { s: 1.0, bottom: 0.25, belt: 0.86, top: 0.90, w: 0.90, wTop: 0.74 },
+    { s: 1.7, bottom: 0.25, belt: 0.80, top: 0.83, w: 0.89, wTop: 0.74 },
+    { s: 2.05, bottom: 0.27, belt: 0.72, top: 0.76, w: 0.87, wTop: 0.72 },
+    { s: 2.20, bottom: 0.29, belt: 0.68, top: 0.71, w: 0.82, wTop: 0.66 },
+    { s: 2.25, bottom: 0.34, belt: 0.62, top: 0.65, w: 0.72, wTop: 0.56 },
+  ],
+  guide: { s0: -2.25, len: 4.5, bottom: 0.25, belt: 0.90, wheelS: [-1.35, 1.35], wheelR: 0.32, seams: [0.95, -0.30, -1.28], handles: [[-0.12, 0.80], [-1.1, 0.80]] },
+  wheelWidth: 0.22,
+  dark: [part(0.56, 0.08, 0.02, 0, 0.575, 2.252), part(0.12, 0.08, 0.07, -0.97, 0.98, 0.78), part(0.12, 0.08, 0.07, 0.97, 0.98, 0.78)],   // grille, mirrors
+  light: [part(0.34, 0.1, 0.1, -0.5, 0.57, 2.212, LENS), part(0.34, 0.1, 0.1, 0.5, 0.57, 2.212, LENS), part(0.44, 0.1, 0.02, 0, 0.47, 2.252, PLATE), part(0.44, 0.1, 0.02, 0, 0.6, -2.252, PLATE)],   // headlights, plates
+  tail: [part(0.36, 0.11, 0.1, -0.5, 0.74, -2.212), part(0.36, 0.11, 0.1, 0.5, 0.74, -2.212)],
+  shadow: [2.3, 5.0],
+});
+const VAN = buildVehicle({     // tall: high enough to hide a person behind it
+  sections: [
+    { s: -2.40, bottom: 0.36, belt: 1.10, top: 1.74, w: 0.86, wTop: 0.74 },
+    { s: -2.34, bottom: 0.31, belt: 1.12, top: 1.84, w: 0.94, wTop: 0.80 },
+    { s: -2.15, bottom: 0.28, belt: 1.12, top: 1.862, w: 0.975, wTop: 0.83 },
+    { s: -1.95, bottom: 0.28, belt: 1.12, top: 1.862, w: 0.975, wTop: 0.83, glass: 'side' },
+    { s: -0.75, bottom: 0.28, belt: 1.12, top: 1.862, w: 0.975, wTop: 0.83 },                   // pillars
+    { s: -0.67, bottom: 0.28, belt: 1.12, top: 1.862, w: 0.975, wTop: 0.83, glass: 'side' },
+    { s: 0.25, bottom: 0.28, belt: 1.12, top: 1.862, w: 0.975, wTop: 0.83 },
+    { s: 0.33, bottom: 0.28, belt: 1.12, top: 1.862, w: 0.975, wTop: 0.83, glass: 'side' },
+    { s: 1.2, bottom: 0.28, belt: 1.12, top: 1.84, w: 0.975, wTop: 0.80, glass: 'both' },       // windscreen
+    { s: 1.78, bottom: 0.28, belt: 1.08, top: 1.12, w: 0.97, wTop: 0.84 },
+    { s: 2.2, bottom: 0.30, belt: 0.98, top: 1.02, w: 0.95, wTop: 0.82 },
+    { s: 2.34, bottom: 0.32, belt: 0.90, top: 0.94, w: 0.90, wTop: 0.76 },
+    { s: 2.40, bottom: 0.38, belt: 0.84, top: 0.86, w: 0.80, wTop: 0.66 },
+  ],
+  guide: { s0: -2.4, len: 4.8, bottom: 0.28, belt: 1.12, wheelS: [-1.5, 1.5], wheelR: 0.36, seams: [1.15, 0.29, -0.71], handles: [[0.42, 1.0], [-0.55, 1.0]] },
+  wheelWidth: 0.24,
+  dark: [part(0.7, 0.12, 0.02, 0, 0.72, 2.402), part(0.1, 0.16, 0.07, -1.04, 1.25, 1.45), part(0.1, 0.16, 0.07, 1.04, 1.25, 1.45), part(1.25, 0.45, 0.03, 0, 1.45, -2.4)],   // grille, mirrors, rear window
+  light: [part(0.3, 0.14, 0.1, -0.58, 0.78, 2.355, LENS), part(0.3, 0.14, 0.1, 0.58, 0.78, 2.355, LENS), part(0.44, 0.1, 0.02, 0, 0.56, 2.402, PLATE), part(0.44, 0.1, 0.02, 0, 0.75, -2.402, PLATE)],
+  tail: [part(0.1, 0.45, 0.08, -0.74, 1.2, -2.375), part(0.1, 0.45, 0.08, 0.74, 1.2, -2.375)],
+  shadow: [2.45, 5.3],
+});
+function paintFor(kind, hex) {                                 // one paint material per vehicle type and colour, shared between vehicles
+  if (!kind.paints.has(hex)) {
+    const m = new THREE.MeshStandardMaterial({ color: hex, map: kind.texture, roughness: 0.3, metalness: 0.4, envMap: garageReflection });
+    kind.paints.set(hex, m); shinyMats.push(m);
+  }
+  return kind.paints.get(hex);
+}
+
+function makeVehicle(tall) {
+  const g = new THREE.Group(), kind = tall ? VAN : SEDAN;
+  const paint = paintFor(kind, carColors[Math.floor(rand() * carColors.length)]);
+  for (const m of shinyMats) m.envMapIntensity = CAR_SHINE * hemi.intensity * (m === glassMat ? 0.12 : 1);   // reflections follow the lighting cue, so cars don't glow in the dark
+  g.add(new THREE.Mesh(kind.body, [paint, glassMat]), new THREE.Mesh(kind.dark, tyreMat), new THREE.Mesh(kind.rims, rimMat),
+        new THREE.Mesh(kind.light, lampMat), new THREE.Mesh(kind.tail, tailMat), new THREE.Mesh(kind.shadow, carShadowMat));
+  return g;
+}
+
+
+function build() {
+  sharedDyn.clear(); LEVELS.forEach(level => level.dyn.clear());
+  const Lc = CONFIG.lighting[cond.lighting];
+  const Cc = CONFIG.concealment[cond.concealment];
+
+  // ---- Lighting cue (the same on both levels and in the ramp lane) ----
+  hemi.intensity = Lc.ambient;
+  scene.fog = new THREE.Fog(0x06080d, 3, Lc.fogFar);
+  lamps.forEach((l, i) => { l.intensity = cond.lighting === 'high' || i === 1 || i === 3 ? Lc.lampIntensity : 0; });
+  flickerLamp = Lc.flicker ? lamps[1] : null;
+  laneFixtures.forEach((f, i) => { f.material = (i * 0.618) % 1 < Lc.fixturesOnShare ? M.tubeOn : M.tubeOff; });
+  laneLamps.forEach((l, i) => { l.intensity = cond.lighting === 'high' || i === 1 ? Lc.lampIntensity : 0; });
+
+  TARGETS.forEach((t, i) => t.material.color.setScalar(Lc.targetBrightness[i]));   // search targets: same contrast in both lighting levels
+
+  // ---- Ramp lane: its outer walls follow the entrapment cue ----
+  const open = cond.entrapment === 'low';
+  showOutside();
+  const zA = LANE.zFar - 0.3, zB = LANE.zNear + 0.3, laneW = LANE.x1 - LANE.x0;
+  if (open) {                                                    // low walls you can see over: one following the ramp, one at the lower floor underneath it
+    const zMeet = LANE.zTop + (LANE.zBottom - LANE.zTop) * (DROP - 1.4) / DROP;   // where the ramp has come down to the top of the lower wall
+    sideProfile([[zA, -0.3], [LANE.zTop, -0.3], [zMeet, -DROP + 1.1], [zMeet, -DROP - 0.3], [zB, -DROP - 0.3], [zB, -DROP + 1.1], [LANE.zBottom, -DROP + 1.1], [LANE.zTop, 1.1], [zA, 1.1]],
+      LANE.x1, LANE.x1 + 0.3, M.wall, M.wall, rampY, sharedDyn);
+    box(0.3, 1.4, zMeet - zA, M.wall, LANE.x1 + 0.15, -DROP + 0.4, (zA + zMeet) / 2, sharedDyn);
+    box(laneW, 1.1, 0.3, M.wall, LANE.xMid, 0.55, LANE.zFar - 0.15, sharedDyn);                    // end wall at the upper landing
+    box(laneW, 1.1, 0.3, M.wall, LANE.xMid, -DROP + 0.55, LANE.zFar - 0.15, sharedDyn);            // end wall underneath the upper landing
+    box(laneW, 1.1, 0.3, M.wall, LANE.xMid, -DROP + 0.55, LANE.zNear + 0.15, sharedDyn);           // end wall at the lower landing
+  } else {                                                       // full walls from the lower floor up to the roof
+    const fullH = H + DROP + 0.3, midY = (H - DROP - 0.3) / 2;
+    box(0.3, fullH, zB - zA, M.wall, LANE.x1 + 0.15, midY, (zA + zB) / 2, sharedDyn);
+    box(laneW, fullH, 0.3, M.wall, LANE.xMid, midY, LANE.zFar - 0.15, sharedDyn);
+    box(laneW, fullH, 0.3, M.wall, LANE.xMid, midY, LANE.zNear + 0.15, sharedDyn);
+  }
+  if (open && !CONFIG.outside.photo) sharedDyn.add(...skylines);
+
+  // ---- Everything below is built once for each level ----
+  for (const level of LEVELS) {
+  const dyn = level.dyn; target = dyn;
+  seed = 17;
+  const litFixtures = [];
+  level.fixtures.forEach((f, i) => {
+    const on = (i * 0.618) % 1 < Lc.fixturesOnShare;
+    f.material = on ? M.tubeOn : M.tubeOff;
+    if (on) litFixtures.push(f);
+  });
+  if (CONFIG.fixtureGlow > 0 && litFixtures.length) {       // soft glow on the ceiling around each lit fixture
+    const glow = new THREE.InstancedMesh(glowGeo, glowMat, litFixtures.length), helper = new THREE.Object3D();
+    litFixtures.forEach((f, i) => { helper.position.set(f.position.x, H - 0.004, f.position.z); helper.scale.set(3, 1, 3.8); helper.updateMatrix(); glow.setMatrixAt(i, helper.matrix); });
+    dyn.add(glow);
+  }
+
+  // ---- Entrapment cue: open sides and exits vs. walled in and blocked ----
+  const sideH = open ? 1.1 : H;                              // low parapet you can see over, or a full wall with no view out
+  box(0.3, sideH, L, M.wall, -10.5, sideH / 2, zMid, dyn);                                   // left side
+  for (const [a, b] of [[zBack, level.cross[0]], [level.cross[1], zFront]])                  // right side, leaving a gap for the cross-aisle
+    if (b - a > 0.05) box(0.3, sideH, b - a, M.wall, 10.5, sideH / 2, (a + b) / 2, dyn);
+  if (cond.entrapment === 'high') {
+    if (level.farExit) {                                      // roll-down gate closes the exit ramp
+      const gate = box(7, H - 0.6, 0.12, M.gate, 0, (H - 0.6) / 2, zBack + 0.1, dyn);
+      for (let y = 0.15; y < H - 0.6; y += 0.3) box(7, 0.03, 0.14, M.tubeOff, 0, y, zBack + 0.1, dyn);
+      gate.name = 'gate';
+    }
+    box(1.0, 2.1, 0.1, M.door, -10.3, 1.05, -14, dyn).rotation.y = Math.PI / 2;  // stairwell door closed
+  } else {
+    box(0.05, 2.1, 1.0, M.door, -10.1, 1.05, -13.3, dyn).rotation.y = -0.9;       // stairwell door propped open
+  }
+  level.exitSigns.forEach(s => { s.material = cond.entrapment === 'low' ? M.exitOn : M.exitOff; });
+
+  // ---- Concealment cue: few low cars vs. full bays of tall vehicles and nooks ----
+  seed = level.seed; // same random sequence for this level's vehicles regardless of the other cues
+  for (const side of [-1, 1]) for (const z of bayZ) {
+    if (Math.abs(z) < 3 && side === 1) continue; // keep the bay next to the participant empty
+    if (rand() > Cc.occupancy) continue;
+    const tall = rand() < Cc.tallShare;
+    if (inCross(level, side, z)) { rand(); continue; }       // no parking in the cross-aisle (the extra rand() keeps every other bay as it was)
+    const v = makeVehicle(tall);
+    v.position.set(side * 6.1, 0, z); v.rotation.y = Math.PI / 2;
+    dyn.add(v);
+  }
+    // ---- Bay dividers: concrete wall (high concealment) or open grate (low concealment) ----
+  const panelStart = DIV.xNear + DIV.post / 2;          // panel begins at the back of the post
+  const panelLen = DIV.xFar - panelStart;
+  const panelX = panelStart + panelLen / 2;             // centre of the panel
+  if (cond.concealment === 'high') {
+    for (const side of [-1, 1]) for (const z of dividerZ) box(panelLen, H, DIV.thick, M.wall, side * panelX, H / 2, z, dyn);
+  } else {
+    const grateBars = [];                               // each entry: [x, y, z, width, height, depth]
+    for (const side of [-1, 1]) for (const z of dividerZ) {
+      for (let x = panelStart + GRATE.spacing; x < DIV.xFar; x += GRATE.spacing) grateBars.push([side * x, H / 2, z, GRATE.bar, H, GRATE.bar]); // uprights
+      for (const y of [0.1, H / 2, H - 0.1]) grateBars.push([side * panelX, y, z, panelLen, GRATE.rail, GRATE.rail]);                          // rails
+    }
+    const grateMesh = new THREE.InstancedMesh(barGeo, grateMat, grateBars.length); // all bars drawn in one go (fast in a headset)
+    const dummy = new THREE.Object3D();
+    grateBars.forEach(([x, y, z, w, h, d], i) => {
+      dummy.position.set(x, y, z); dummy.scale.set(w, h, d); dummy.updateMatrix();
+      grateMesh.setMatrixAt(i, dummy.matrix);
+    });
+    dyn.add(grateMesh);
+  }
+  if (cond.concealment === 'high') {
+    box(1.9, 1.4, 1.1, M.dumpster, 9.4, 0.7, -9, dyn);
+    box(1.9, 1.4, 1.1, M.dumpster, 9.4, 0.7, -21, dyn); 
+    // can copy these to make more dumpsters if you want to fill the space more
+    box(2.5, H, 0.25, M.wall, -9.2, H / 2, -11.5, dyn);   // alcove walls around the stairwell door
+    box(2.5, H, 0.25, M.wall, -9.2, H / 2, -16.5, dyn);
+  }
+  }   // end of the per-level loop
+  target = scene;
+}
+
+// ================= Controls, trial, log =================
+const events = [];
+const logEvent = (name, detail = '') => events.push([new Date().toISOString(), performance.now().toFixed(1), name, detail]);
+const $ = id => document.getElementById(id);
+const sel = { lighting: $('c-light'), entrapment: $('c-entrap'), concealment: $('c-conceal') };
+const label = () => `lighting=${cond.lighting};entrapment=${cond.entrapment};concealment=${cond.concealment}`;
+function setCond(next) {
+  Object.assign(cond, next); seenTargets.clear();
+  for (const k in sel) sel[k].value = cond[k];
+  build(); logEvent('condition_set', label());
+}
+for (const k in sel) sel[k].addEventListener('change', () => setCond({ [k]: sel[k].value }));
+$('preset-control').addEventListener('click', () => setCond({ lighting: 'high', entrapment: 'low', concealment: 'low' }));
+$('preset-threat').addEventListener('click', () => setCond({ lighting: 'low', entrapment: 'high', concealment: 'high' }));
+
+$('log').addEventListener('click', () => {
+  const csv = 'iso_time,page_ms,event,detail\n' + events.map(e => e.join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `garage-events-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+});
+renderer.xr.addEventListener('sessionstart', () => { camera.position.set(0, 0, 0); logEvent('vr_start'); });
+renderer.xr.addEventListener('sessionend', () => { camera.position.set(0, CONFIG.eyeHeight, 0); logEvent('vr_end'); });
+
+// ---- Start screen: the click starts the timing, gives the page keyboard focus and locks the mouse to the view ----
+let started = false;
+function begin() {
+  if (!assetsReady || started) return;
+  started = true; lastWalkTime = performance.now();
+  $('start-screen').hidden = true; $('bar').hidden = false;
+  logEvent('begin');
+  window.focus(); lockPointer();
+}
+$('begin').addEventListener('click', begin);
+
+// ---- Looking around with pointer lock: the mouse turns the view without dragging; Esc frees the mouse ----
+// If the browser or the Qualtrics frame refuses pointer lock, dragging with the mouse button held turns the view instead.
+let yaw = 0, pitch = 0, dragLogged = false;
+function lockPointer() {
+  try {
+    const p = renderer.domElement.requestPointerLock();
+    if (p && p.catch) p.catch(e => logEvent('pointer_lock_failed', e.name));
+  } catch (e) { logEvent('pointer_lock_failed', e.name); }
+}
+renderer.domElement.addEventListener('click', () => { if (started && document.pointerLockElement !== renderer.domElement) lockPointer(); });
+document.addEventListener('pointerlockchange', () => logEvent(document.pointerLockElement === renderer.domElement ? 'pointer_locked' : 'pointer_released'));
+document.addEventListener('mousemove', e => {
+  const locked = document.pointerLockElement === renderer.domElement, dragging = started && (e.buttons & 1) && e.target === renderer.domElement;
+  if (!locked && !dragging) return;
+  if (!locked && !dragLogged) { dragLogged = true; logEvent('look_by_drag'); }   // logged once: this participant looked by dragging
+  const perPixel = CONFIG.look.degreesPerPixel * Math.PI / 180, limit = CONFIG.look.maxPitch * Math.PI / 180;
+  yaw -= e.movementX * perPixel;
+  pitch = Math.max(-limit, Math.min(limit, pitch - e.movementY * perPixel));
+  camera.rotation.set(pitch, yaw, 0);
+});
+
+// ---- Leaving the window or tab (logged, so the analysis can see how often and how long) ----
+window.addEventListener('blur', () => logEvent('focus_lost'));
+window.addEventListener('focus', () => logEvent('focus_back'));
+document.addEventListener('visibilitychange', () => logEvent(document.hidden ? 'page_hidden' : 'page_visible'));
+// ---- Where you can walk ----
+// The walkable floor is five connected areas. Each is a rectangle (x and z ranges) and lists the areas it joins onto.
+// The two aisles sit one above the other, so the page keeps track of which area you are in.
+const walkHalf = CONFIG.walk.halfWidth, walkGap = CONFIG.walk.endGap, laneRight = LANE.x1 - 0.45;
+const ZONES = {
+  upperAisle: { level: 0, x: [-walkHalf, walkHalf], z: [LANE.zFar + 0.5, zFront - walkGap], next: ['upperCross'] },   // ends level with the cross-aisle, so at the end the only way on is the turn
+  upperCross: { level: 0, x: [walkHalf, laneRight], z: [LANE.zFar + 0.5, LANE.zTop - 0.5], next: ['upperAisle', 'ramp'] },
+  ramp:       {           x: [LANE.x0 + 0.45, laneRight], z: [LANE.zTop - 0.5, LANE.zBottom + 0.5], next: ['upperCross', 'lowerCross'] },
+  lowerCross: { level: 1, x: [walkHalf, laneRight], z: [LANE.zBottom + 0.5, LANE.zNear - 0.5], next: ['ramp', 'lowerAisle'] },
+  lowerAisle: { level: 1, x: [-walkHalf, walkHalf], z: [zBack + walkGap, zFront - walkGap], next: ['lowerCross'] },
+};
+let zoneName = 'upperAisle';
+const insideZone = (zone, x, z) => x >= zone.x[0] && x <= zone.x[1] && z >= zone.z[0] && z <= zone.z[1];
+function refreshLevels() {
+  const zone = ZONES[zoneName], p = player.position;
+  p.y = zone.level === undefined ? rampY(p.z) : LEVELS[zone.level].y;                           // stand on the floor of the area you are in
+  const lit = zone.level ?? (p.z < (LANE.zTop + LANE.zBottom) / 2 ? 0 : 1);                     // on the ramp: the nearer level
+  lamps.forEach(l => { l.position.y = LEVELS[lit].y + H - 0.2; });
+  LEVELS[0].group.visible = zoneName !== 'lowerAisle';       // a level you cannot see from where you are is not drawn (faster)
+  LEVELS[1].group.visible = zoneName !== 'upperAisle';
+}
+function moveBy(dx, dz) {
+  const p = player.position;
+  for (const [x, z] of [[p.x + dx, p.z + dz], [p.x + dx, p.z], [p.x, p.z + dz]]) {              // the whole step, or else slide along the wall
+    const name = [zoneName, ...ZONES[zoneName].next].find(n => insideZone(ZONES[n], x, z));
+    if (!name) continue;
+    p.x = x; p.z = z;
+    if (name !== zoneName) { zoneName = name; logEvent('entered_area', name); }
+    break;
+  }
+  refreshLevels();
+}
+refreshLevels();
+
+// ---- Walking with W A S D or the arrow keys (desktop and emulator) ----
+// Moves the viewer in the direction they are looking.
+const keysDown = new Set(), walkAhead = new THREE.Vector3(), walkRight = new THREE.Vector3();
+let lastWalkTime = performance.now();
+const typingInPanel = () => ['SELECT', 'INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+window.addEventListener('keydown', e => {
+  if (typingInPanel()) return;
+  if (e.code.startsWith('Arrow')) e.preventDefault();
+  keysDown.add(e.code);
+});
+window.addEventListener('keyup', e => keysDown.delete(e.code));
+window.addEventListener('blur', () => keysDown.clear());   // no stuck keys after switching windows
+function walk() {
+  const now = performance.now(), dt = Math.min((now - lastWalkTime) / 1000, 0.1); lastWalkTime = now;
+  if (!started) return;
+  const held = (a, b) => (keysDown.has(a) || keysDown.has(b) ? 1 : 0);
+  const ahead = held('KeyW', 'ArrowUp') - held('KeyS', 'ArrowDown'), right = held('KeyD', 'ArrowRight') - held('KeyA', 'ArrowLeft');
+  if (!ahead && !right) return;
+  camera.getWorldDirection(walkAhead); walkAhead.y = 0;      // where the viewer is facing, flattened to the floor
+  if (walkAhead.lengthSq() < 1e-6) return;                   // looking straight up or down
+  walkAhead.normalize(); walkRight.set(-walkAhead.z, 0, walkAhead.x);
+  const step = walkAhead.multiplyScalar(ahead).addScaledVector(walkRight, right).normalize().multiplyScalar(CONFIG.walk.speed * dt);
+  moveBy(step.x, step.z);
+}
+
+// ---- Which targets are in view: a tiny picture in which everything is black except the targets, each in its own colour ----
+// Anything in front of a target hides it, as on screen. A target counts as seen once it covers TARGET_SEEN_PIXELS of this
+// 160 x 90 picture (3 pixels is about 100 on a 960 x 540 screen; a target then is roughly 11 m away or closer).
+const TARGET_SEEN_PIXELS = 3, TARGET_CHECK_SECONDS = 0.25;
+const seenTargets = new Set();
+let lastTargetCheck = 0;
+const ID_W = 160, ID_H = 90, idTarget = new THREE.WebGLRenderTarget(ID_W, ID_H), idPixels = new Uint8Array(ID_W * ID_H * 4);
+const ID_COLOURS = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255]];
+const idScene = new THREE.Scene(), idBlack = new THREE.MeshBasicMaterial({ color: 0x000000, fog: false }), BLACK = new THREE.Color(0, 0, 0);
+const idMeshes = TARGETS.map((t, i) => {
+  const m = new THREE.Mesh(targetGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(...ID_COLOURS[i].map(v => v / 255)), fog: false }));
+  m.matrixAutoUpdate = false; idScene.add(m); return m;
+});
+const isShown = o => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
+function targetsInView(cam = camera) {                       // pixels of each target in view, after anything in front of it
+  const bg = scene.background, autoClear = renderer.autoClear;
+  scene.overrideMaterial = idBlack; scene.background = BLACK;
+  renderer.setRenderTarget(idTarget); renderer.clear(); renderer.render(scene, cam);   // everything black, for the depth
+  idMeshes.forEach((m, i) => { m.visible = isShown(TARGETS[i]); m.matrix.copy(TARGETS[i].matrixWorld); });
+  renderer.autoClear = false; renderer.render(idScene, cam);   // then the targets in colour, wherever nothing is in front of them
+  renderer.autoClear = autoClear; renderer.setRenderTarget(null); scene.overrideMaterial = null; scene.background = bg;
+  renderer.readRenderTargetPixels(idTarget, 0, 0, ID_W, ID_H, idPixels);
+  const counts = ID_COLOURS.map(() => 0);
+  for (let k = 0; k < idPixels.length; k += 4) {
+    const i = ID_COLOURS.findIndex(c => c[0] === idPixels[k] && c[1] === idPixels[k + 1] && c[2] === idPixels[k + 2]);
+    if (i >= 0) counts[i]++;
+  }
+  return counts;
+}
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const t = clock.getElapsedTime();
+    walk();
+  if (started && t - lastTargetCheck > TARGET_CHECK_SECONDS && !renderer.xr.isPresenting) {    // log each target the first time it is in view
+    lastTargetCheck = t;
+    targetsInView().forEach((pixels, i) => { if (pixels >= TARGET_SEEN_PIXELS && !seenTargets.has(i)) { seenTargets.add(i); logEvent('target_seen', TARGETS[i].name); } });
+  }
+  if (flickerLamp) {
+    const on = Math.sin(t * 19) + Math.sin(t * 5.7) > -0.4 || Math.random() > 0.92;
+    flickerLamp.intensity = on ? CONFIG.lighting.low.lampIntensity : 0.5;
+  }
+  renderer.render(scene, camera);
+});
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+// ---- Researcher tool: screenshots from fixed viewpoints, to compare brightness with the Unity version ----
+// In the browser console: await garageCapture({ condition: 'threat' }). Each viewpoint: [area, x, z, look x, look z].
+// The same viewpoints are in Unity under Garage > Capture Viewpoints.
+const VIEWPOINTS = {
+  upperStart: ['upperAisle', 0.8, 0, 0, -1], upperCross: ['upperCross', 7, -45.5, 1, 0], midRamp: ['ramp', 14.15, -22.1, 0, 1],
+  lowerStart: ['lowerAisle', 2, 1.3, 0, -1], viewOut: ['upperAisle', 0.8, 0, -1, 0],
+};
+// How visible each exit sign is in the picture just rendered (pixels d): each sign is drawn once more in its own flat colour,
+// which gives its on-screen size after anything in front of it, and its brightness is read from the real picture.
+const SRGB_TO_LINEAR = Array.from({ length: 256 }, (_, v) => { const c = v / 255; return c < 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+const SIGN_IDS = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255], [255, 128, 0], [128, 0, 255], [0, 128, 255]];
+function measureSigns(d, width, height) {
+  const signs = [...LEVELS.flatMap(l => l.exitSigns.map((mesh, k) => ({ mesh, name: l.name + (k === 0 ? ' stairwell' : ' exit ramp') }))),
+                 ...TARGETS.map(mesh => ({ mesh, name: mesh.name }))];
+  const saved = signs.map(s => s.mesh.material), bg = scene.background;
+  signs.forEach((s, i) => { s.mesh.material = new THREE.MeshBasicMaterial({ color: new THREE.Color().setRGB(...SIGN_IDS[i].map(v => v / 255), THREE.SRGBColorSpace), fog: false }); });
+  scene.background = new THREE.Color(0, 0, 0);
+  renderer.render(scene, camera);
+  const c = canvasOf(width, height), g = c.getContext('2d'); g.drawImage(renderer.domElement, 0, 0, width, height);
+  const ids = g.getImageData(0, 0, width, height).data;
+  signs.forEach((s, i) => { s.mesh.material.dispose(); s.mesh.material = saved[i]; }); scene.background = bg;
+  const lumAt = k => 0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2];
+  const linAt = k => 0.2126 * SRGB_TO_LINEAR[d[k]] + 0.7152 * SRGB_TO_LINEAR[d[k + 1]] + 0.0722 * SRGB_TO_LINEAR[d[k + 2]];   // light, not pixel value
+  return signs.map((s, i) => {
+    const [r, gg, b] = SIGN_IDS[i]; let n = 0, lum = 0, lin = 0, x0 = width, y0 = height, x1 = -1, y1 = -1;
+    const mine = k => Math.abs(ids[k] - r) < 3 && Math.abs(ids[k + 1] - gg) < 3 && Math.abs(ids[k + 2] - b) < 3;
+    for (let k = 0; k < ids.length; k += 4) if (mine(k)) {
+      n++; lum += lumAt(k); lin += linAt(k); const x = (k / 4) % width, y = Math.floor(k / 4 / width);
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    }
+    let around = 0, aroundLin = 0, m = 0;                                        // the surroundings: a box twice the object's size, minus the object
+    if (n) {
+      const w = x1 - x0 + 1, h = y1 - y0 + 1;
+      for (let y = Math.max(0, y0 - h); y <= Math.min(height - 1, y1 + h); y++) for (let x = Math.max(0, x0 - w); x <= Math.min(width - 1, x1 + w); x++) {
+        const k = (y * width + x) * 4; if (!mine(k)) { around += lumAt(k); aroundLin += linAt(k); m++; }
+      }
+    }
+    // ratio: how many times brighter the object is than its surroundings, in light (Weber contrast = ratio - 1)
+    return { sign: s.name, pixels: n, brightness: n ? +(lum / n).toFixed(1) : null, surroundings: m ? +(around / m).toFixed(1) : null,
+             ratio: n && m && aroundLin > 0 ? (lin / n) / (aroundLin / m) : null };
+  });
+}
+const garageEvents = () => events.slice();                         // the event log so far (researcher check)
+const garageTargetsAt = (zone, x, z, dx, dz) => {                   // pixels of each target seen from a spot (researcher check)
+  const saved = { zone: zoneName, pos: player.position.clone(), rot: camera.quaternion.clone() };
+  zoneName = zone; player.position.x = x; player.position.z = z; refreshLevels();
+  camera.rotation.set(0, Math.atan2(-dx, -dz), 0, 'YXZ'); player.updateMatrixWorld(true); scene.updateMatrixWorld(true);
+  const counts = targetsInView();
+  zoneName = saved.zone; player.position.copy(saved.pos); camera.quaternion.copy(saved.rot); refreshLevels();
+  return Object.fromEntries(TARGETS.map((t, i) => [t.name, counts[i]]));
+};
+const garageMove = (dx, dz, steps = 1) => {                         // take walking steps (three.js x and z per step) and report where you are
+  for (let i = 0; i < steps; i++) moveBy(dx, dz);
+  return { area: zoneName, x: +player.position.x.toFixed(2), y: +player.position.y.toFixed(2), z: +player.position.z.toFixed(2) };
+};
+const garageTargetImage = () => targetCanvas.toDataURL('image/png');   // the target picture, for the Unity version
+const garageCapture = async ({ condition = 'control', views = Object.keys(VIEWPOINTS), extra = [], width = 960, height = 540, magenta = false, backgroundOnly = false, signStats = false, noGlow = false } = {}) => {
+  for (let i = 0; i < 100 && CONFIG.outside.photo && !outsidePhoto; i++) await new Promise(r => setTimeout(r, 100));   // wait for the photo
+  const saved = { cond: { ...cond }, zone: zoneName, pos: player.position.clone(), camPos: camera.position.clone(), camRot: camera.quaternion.clone(), ratio: renderer.getPixelRatio() };
+  setCond(condition === 'threat' ? { lighting: 'low', entrapment: 'high', concealment: 'high' } : { lighting: 'high', entrapment: 'low', concealment: 'low' });
+  if (magenta) scene.background = new THREE.Color(1, 0, 1);       // anything magenta in the picture is the outside showing through
+  const glowOpacity = glowMat.opacity; if (noGlow) glowMat.opacity = 0;   // to measure what the ceiling glow adds
+  const shots = [...views.map(v => [v, ...VIEWPOINTS[v], 0]), ...extra];
+  const out = [];
+  renderer.setPixelRatio(1); renderer.setSize(width, height, false); camera.aspect = width / height; camera.updateProjectionMatrix();
+  for (const [name, zone, x, z, dx, dz, pitch = 0] of shots) {
+    zoneName = zone; player.position.x = x; player.position.z = z; refreshLevels();
+    camera.position.set(0, CONFIG.eyeHeight, 0); camera.rotation.set(pitch, Math.atan2(-dx, -dz), 0, 'YXZ');
+    if (backgroundOnly) {                                         // only the outside photo, with nothing in front of it (to line it up with Unity)
+      const sky = new THREE.Scene(); sky.background = scene.background; sky.backgroundIntensity = scene.backgroundIntensity; sky.backgroundRotation.copy(scene.backgroundRotation);
+      player.updateMatrixWorld(true); renderer.render(sky, camera);   // the camera isn't in this scene, so update its position by hand
+    } else renderer.render(scene, camera);
+    const c = canvasOf(width, height), g = c.getContext('2d'); g.drawImage(renderer.domElement, 0, 0, width, height);
+    const d = g.getImageData(0, 0, width, height).data; let sum = 0, outside = 0;
+    for (let i = 0; i < d.length; i += 4) { sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]; if (d[i] - d[i + 1] > 80 && d[i + 2] - d[i + 1] > 80) outside++; }
+    const shot = { name, condition, meanBrightness: +(sum / (width * height)).toFixed(2), outsideShare: outside / (width * height) };
+    if (signStats) shot.signs = measureSigns(d, width, height); else shot.image = c.toDataURL('image/png');
+    out.push(shot);
+  }
+  glowMat.opacity = glowOpacity;
+  setCond(saved.cond); zoneName = saved.zone; player.position.copy(saved.pos); refreshLevels();
+  camera.position.copy(saved.camPos); camera.quaternion.copy(saved.camRot);
+  renderer.setPixelRatio(saved.ratio); renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+  return out;
+};
+// ================= Start: check the link, then show the start screen =================
+const T = window.GARAGE_TEXT;
+$('begin').textContent = T.begin; $('bar-task').textContent = T.task; $('bar-controls').textContent = T.controls; $('error-text').textContent = T.linkError;
+const CONDITIONS = { '0': { lighting: 'high', entrapment: 'low', concealment: 'low' },      // 0 = control
+                     '1': { lighting: 'low', entrapment: 'high', concealment: 'high' } };   // 1 = threat
+logEvent('page_loaded', `c=${condCode ?? ''};pid=${pid};debug=${DEBUG ? 1 : 0}`);
+if (DEBUG) {
+  $('panel').hidden = false;
+  Object.assign(window, { garageEvents, garageTargetsAt, garageTargetImage, garageCapture, garageMove });   // researcher tools in the browser console
+}
+// "Click to begin" works only once every picture has loaded, so control never starts with the outside photo missing.
+// A picture that fails to load stops the page with the error screen (and is logged), rather than showing a different scene.
+let assetsReady = false;
+$('begin').disabled = true; $('begin').textContent = T.loading;
+THREE.DefaultLoadingManager.onLoad = () => {
+  assetsReady = true; logEvent('assets_loaded');
+  $('begin').disabled = false; $('begin').textContent = T.begin;
+};
+THREE.DefaultLoadingManager.onError = url => {
+  logEvent('error', 'could not load ' + url.replace(/,/g, ' '));
+  $('start-screen').hidden = true; $('error-screen').hidden = false;
+};
+if (CONDITIONS[condCode]) {
+  setCond(CONDITIONS[condCode]); logEvent('condition_shown', condCode);
+  $('start-screen').hidden = false;
+} else if (DEBUG && condCode === null) {
+  setCond({}); $('start-screen').hidden = false;                       // researcher mode without a code: control, switch with the panel
+} else {
+  logEvent('error', 'condition code ' + (condCode === null ? 'missing' : 'not 0 or 1'));   // never fall back to a condition
+  $('error-screen').hidden = false;
+}
+</script>
+</body>
+</html>
