@@ -13,6 +13,7 @@ window.GARAGE_TEXT = {
   task: '[instructions]',                                     // shown at the top of the screen, before the controls
   controls: 'Walk: W A S D or the arrow keys \u00b7 Look around: move the mouse \u00b7 Esc frees the mouse; click the garage to look around again',
   linkError: 'This link is incomplete, so the garage cannot start. Please tell the researcher.',
+  noWebgl: 'This computer or browser cannot show the 3D garage (WebGL is not available). Please continue with the survey.',
 };
 </script>
 <!-- ================================ end of participant text ============================== -->
@@ -123,7 +124,14 @@ const CONFIG = {
 };
 
 // ================= Renderer and viewer =================
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+let renderer;
+try { renderer = new THREE.WebGLRenderer({ antialias: true }); }
+catch (e) {                                                              // no WebGL: say so, tell Qualtrics, and stop here
+  document.getElementById('error-text').textContent = window.GARAGE_TEXT.noWebgl; document.getElementById('error-screen').hidden = false;
+  const origin = (() => { try { return new URL(document.referrer).origin; } catch { return ''; } })();
+  if (origin && window.parent !== window) window.parent.postMessage({ source: 'garage', version: 1, results: { webgl: 'none', load_error: 'no WebGL' } }, origin);
+  throw e;
+}
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.xr.enabled = true;
@@ -933,7 +941,82 @@ function build() {
 
 // ================= Controls, trial, log =================
 const events = [];
-const logEvent = (name, detail = '') => events.push([new Date().toISOString(), performance.now().toFixed(1), name, detail]);
+const logEvent = (name, detail = '') => { events.push([new Date().toISOString(), performance.now().toFixed(1), name, detail]); queueResults(); };
+
+// ================= Results for Qualtrics =================
+// The participant can click Qualtrics' Next at any moment, so the page sends its running results to the Qualtrics page
+// around it every few seconds and whenever something is logged. Qualtrics keeps the latest copy and saves it at Next
+// (see qualtrics/garage_question.js, which also adds the Next-click time). Every value is a short string.
+const GARAGE_VERSION = '2026-11-03';                                  // change when the page changes, so the data says which version ran
+const RESULTS_EVERY_SECONDS = 2;
+const PARENT_ALLOWED = /^https:\/\/([a-z0-9-]+\.)*qualtrics\.com$|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;   // who may receive the results
+const parentOrigin = (() => { try { return new URL(document.referrer).origin; } catch { return ''; } })();
+const AREA_CODES = { upperAisle: 'UA', upperCross: 'UC', ramp: 'R', lowerCross: 'LC', lowerAisle: 'LA' };
+const EVENT_CODES = { page_loaded: 'L', condition_shown: 'C', assets_loaded: 'A', begin: 'B', entered_area: 'E', target_seen: 'T', focus_lost: 'F-', focus_back: 'F+',
+  page_hidden: 'H-', page_visible: 'H+', pointer_locked: 'P+', pointer_released: 'P-', pointer_lock_failed: 'PX', look_by_drag: 'D', error: 'X' };
+const LOG_PIECES = 4, LOG_PIECE_CHARS = 900;                            // the event log goes into event_log_1..4, each under 1,000 characters
+let distanceWalked = 0, resultsQueued = false, resultsSent = 0;
+const frameBins = new Uint32Array(201);                                 // how many frames took 0, 1, ... 200+ ms (only after the start click)
+let frameCount = 0, lastFrameAt = 0;
+function recordFrame(now) {
+  if (lastFrameAt && !document.hidden) { frameBins[Math.min(200, Math.round(now - lastFrameAt))]++; frameCount++; }
+  lastFrameAt = document.hidden ? 0 : now;
+}
+function queueResults() { if (!resultsQueued) { resultsQueued = true; setTimeout(() => { resultsQueued = false; postResults(); }, 0); } }
+function postResults() {
+  if (window.parent === window || !PARENT_ALLOWED.test(parentOrigin)) return;   // only into a Qualtrics page (or a local test page)
+  window.parent.postMessage({ source: 'garage', version: 1, results: currentResults() }, parentOrigin);
+  resultsSent++;
+}
+setInterval(postResults, RESULTS_EVERY_SECONDS * 1000);
+
+function currentResults() {
+  const now = performance.now(), epochOf = ms => Math.round(Date.now() - (now - ms));
+  const beginEv = events.find(e => e[2] === 'begin'), beginMs = beginEv ? +beginEv[1] : null;
+  const after = beginMs === null ? [] : events.filter(e => +e[1] >= beginMs);
+  const rel = ms => Math.round(ms - (beginMs ?? 0));
+  // Areas: each visit in order, with its start (ms after the start click). The current visit is finished by Qualtrics at Next.
+  const visits = beginMs === null ? [] : [['UA', beginMs], ...after.filter(e => e[2] === 'entered_area').map(e => [AREA_CODES[e[3]], +e[1]])];
+  const areaMs = { UA: 0, UC: 0, R: 0, LC: 0, LA: 0 };
+  visits.forEach(([a, start], i) => { if (i < visits.length - 1) areaMs[a] += visits[i + 1][1] - start; });
+  const lastVisit = visits[visits.length - 1];
+  // Time away: losing window focus (another window or the Qualtrics page) and hiding the tab, after the start click
+  const away = (off, on) => {
+    let n = 0, total = 0, since = null;
+    for (const e of after) { if (e[2] === off && since === null) { n++; since = +e[1]; } else if (e[2] === on && since !== null) { total += +e[1] - since; since = null; } }
+    return { n, ms: Math.round(total + (since !== null ? now - since : 0)), openSince: since };
+  };
+  const focus = away('focus_lost', 'focus_back'), hidden = away('page_hidden', 'page_visible');
+  // Frame rate: median frame time and share of slow frames (longer than 50 ms, i.e. under 20 frames a second)
+  let median = '', slow = 0;
+  if (frameCount) { let c = 0; for (let i = 0; i <= 200; i++) { c += frameBins[i]; if (median === '' && c >= frameCount / 2) median = i; if (i > 50) slow += frameBins[i]; } }
+  const seen = after.filter(e => e[2] === 'target_seen');
+  // Compact event log: code@ms after the start click (negative = before it), e.g. B@0|E:UC@21857|T:T3@30120
+  let log = events.filter(e => EVENT_CODES[e[2]]).map(e => {
+    const code = EVENT_CODES[e[2]], d = e[2] === 'entered_area' ? AREA_CODES[e[3]] : e[2] === 'target_seen' ? e[3] : e[2] === 'condition_shown' ? e[3] : e[2] === 'error' ? e[3].slice(0, 40).replace(/[|@]/g, ' ') : '';
+    return (d ? code + ':' + d : code) + '@' + rel(+e[1]);
+  }).join('|');
+  const room = LOG_PIECES * LOG_PIECE_CHARS;
+  if (log.length > room) log = log.slice(0, room / 2 - 2) + '|~|' + log.slice(log.length - (room / 2 - 2));   // too long: keep the start and the end
+  const r = {
+    page_version: GARAGE_VERSION, cond_shown: CONDITIONS_SHOWN ?? '', pid_shown: pid, results_sent: String(resultsSent + 1),
+    begun: beginMs === null ? '0' : '1', garage_start_iso: beginEv ? beginEv[0] : '', begin_epoch_ms: beginMs === null ? '' : String(epochOf(beginMs)),
+    area_seq: visits.map(([a, start]) => a + '@' + rel(start)).join('|'),
+    area_now: lastVisit ? lastVisit[0] : '', area_now_since_epoch_ms: lastVisit ? String(epochOf(lastVisit[1])) : '',
+    distance_m: distanceWalked.toFixed(1),
+    fps_median: median === '' ? '' : (median ? (1000 / median).toFixed(1) : '1000'), frame_ms_median: String(median), slow_frame_share: frameCount ? (slow / frameCount).toFixed(4) : '', frames_n: String(frameCount),
+    window_w: String(window.innerWidth), window_h: String(window.innerHeight), screen_w: String(screen.width), screen_h: String(screen.height), dpr: String(window.devicePixelRatio),
+    webgl: renderer.capabilities.isWebGL2 ? 'webgl2' : 'webgl1', max_texture: String(renderer.capabilities.maxTextureSize),
+    focus_lost_n: String(focus.n), focus_lost_ms: String(focus.ms), focus_out_since_epoch_ms: focus.openSince === null ? '' : String(epochOf(focus.openSince)),
+    hidden_n: String(hidden.n), hidden_ms: String(hidden.ms),
+    pointer: events.some(e => e[2] === 'pointer_locked') ? 'locked' : events.some(e => e[2] === 'look_by_drag') ? 'drag' : 'none',
+    targets_seen_n: String(new Set(seen.map(e => e[3])).size), targets_seen: seen.map(e => e[3] + '@' + rel(+e[1])).join('|'),
+    load_error: events.filter(e => e[2] === 'error').map(e => e[3]).join('; ').slice(0, 300),
+  };
+  for (const a of Object.keys(areaMs)) r['area_ms_' + a] = String(Math.round(areaMs[a]));
+  for (let i = 0; i < LOG_PIECES; i++) r['event_log_' + (i + 1)] = log.slice(i * LOG_PIECE_CHARS, (i + 1) * LOG_PIECE_CHARS);
+  return r;
+}
 const $ = id => document.getElementById(id);
 const sel = { lighting: $('c-light'), entrapment: $('c-entrap'), concealment: $('c-conceal') };
 const label = () => `lighting=${cond.lighting};entrapment=${cond.entrapment};concealment=${cond.concealment}`;
@@ -1018,6 +1101,7 @@ function moveBy(dx, dz) {
   for (const [x, z] of [[p.x + dx, p.z + dz], [p.x + dx, p.z], [p.x, p.z + dz]]) {              // the whole step, or else slide along the wall
     const name = [zoneName, ...ZONES[zoneName].next].find(n => insideZone(ZONES[n], x, z));
     if (!name) continue;
+    distanceWalked += Math.hypot(x - p.x, z - p.z);                       // reported to Qualtrics as distance_m
     p.x = x; p.z = z;
     if (name !== zoneName) { zoneName = name; logEvent('entered_area', name); }
     break;
@@ -1084,6 +1168,7 @@ function targetsInView(cam = camera) {                       // pixels of each t
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const t = clock.getElapsedTime();
+  if (started) recordFrame(performance.now());
     walk();
   if (started && t - lastTargetCheck > TARGET_CHECK_SECONDS && !renderer.xr.isPresenting) {    // log each target the first time it is in view
     lastTargetCheck = t;
@@ -1187,6 +1272,7 @@ const garageCapture = async ({ condition = 'control', views = Object.keys(VIEWPO
 // ================= Start: check the link, then show the start screen =================
 const T = window.GARAGE_TEXT;
 $('begin').textContent = T.begin; $('bar-task').textContent = T.task; $('bar-controls').textContent = T.controls; $('error-text').textContent = T.linkError;
+let CONDITIONS_SHOWN = null;                                           // the code of the condition this page actually built
 const CONDITIONS = { '0': { lighting: 'high', entrapment: 'low', concealment: 'low' },      // 0 = control
                      '1': { lighting: 'low', entrapment: 'high', concealment: 'high' } };   // 1 = threat
 logEvent('page_loaded', `c=${condCode ?? ''};pid=${pid};debug=${DEBUG ? 1 : 0}`);
@@ -1207,7 +1293,7 @@ THREE.DefaultLoadingManager.onError = url => {
   $('start-screen').hidden = true; $('error-screen').hidden = false;
 };
 if (CONDITIONS[condCode]) {
-  setCond(CONDITIONS[condCode]); logEvent('condition_shown', condCode);
+  setCond(CONDITIONS[condCode]); CONDITIONS_SHOWN = condCode; logEvent('condition_shown', condCode);
   $('start-screen').hidden = false;
 } else if (DEBUG && condCode === null) {
   setCond({}); $('start-screen').hidden = false;                       // researcher mode without a code: control, switch with the panel
