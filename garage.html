@@ -14,6 +14,9 @@ window.GARAGE_TEXT = {
   controls: 'Walk: W A S D or the arrow keys \u00b7 Look around: move the mouse \u00b7 Esc frees the mouse; click the garage to look around again',
   linkError: 'This link is incomplete, so the garage cannot start. Please tell the researcher.',
   noWebgl: 'This computer or browser cannot show the 3D garage (WebGL is not available). Please continue with the survey.',
+  probeQuestion: 'What are three words to describe how you are feeling right now?',   // the pop-up question (see CONFIG.probes for when)
+  probeWord: 'Word',                                          // label before each box: Word 1, Word 2, Word 3
+  probeButton: 'Continue',                                    // closes the pop-up; boxes may be left empty (answers are optional)
 };
 </script>
 <!-- ================================ end of participant text ============================== -->
@@ -31,6 +34,13 @@ window.GARAGE_TEXT = {
   .screen { position: fixed; inset: 0; background: #0b0e11; display: flex; align-items: center; justify-content: center; z-index: 10; padding: 16px; }
   .screen p { max-width: 36em; text-align: center; font-size: 17px; }
   #begin { font-size: 20px; padding: 14px 28px; border-radius: 8px; }
+  #probe { position: fixed; inset: 0; background: rgba(5, 7, 9, 0.62); display: flex; align-items: center; justify-content: center; z-index: 8; padding: 16px; }
+  #probe form { background: #182024; border-radius: 10px; padding: 22px 24px; width: min(460px, 100%); box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; }
+  #probe-question { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  #probe label { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 10px; }
+  #probe input { font: inherit; font-size: 16px; padding: 7px 9px; border-radius: 5px; border: 1px solid #44545b; background: #0f1518; color: var(--fg); }
+  #probe input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #probe button { align-self: flex-end; font-size: 16px; padding: 8px 20px; }
   [hidden] { display: none !important; }
   #panel { position: fixed; top: 64px; left: 12px; width: min(350px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto;
            background: var(--panel); border-radius: 8px; padding: 14px 16px; box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; }
@@ -78,6 +88,15 @@ window.GARAGE_TEXT = {
 <div id="bar" hidden><span id="bar-task"></span><span id="bar-controls"></span></div>
 <div id="start-screen" class="screen" hidden><button id="begin" type="button"></button></div>
 <div id="error-screen" class="screen" hidden><p id="error-text"></p></div>
+<div id="probe" hidden>
+  <form id="probe-form" autocomplete="off">
+    <p id="probe-question"></p>
+    <label><span class="probe-label"></span> <input id="probe-w1" maxlength="40" spellcheck="false"></label>
+    <label><span class="probe-label"></span> <input id="probe-w2" maxlength="40" spellcheck="false"></label>
+    <label><span class="probe-label"></span> <input id="probe-w3" maxlength="40" spellcheck="false"></label>
+    <button id="probe-submit" type="submit"></button>
+  </form>
+</div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -112,6 +131,7 @@ const CONFIG = {
   // ---- Realism settings (the same in every condition) ----
     walk: { speed: 3.5, halfWidth: 3.0, endGap: 1.5 }, // walking speed in metres per second; how far from the centre line and from each end you can go
     look: { degreesPerPixel: 0.15, maxPitch: 85 },    // how far the view turns per pixel of mouse movement; how far you can look up or down (degrees)
+    probes: { at: [10, 30] },                         // pop-up question after this many seconds of exploring (time spent answering a pop-up doesn't count)
     outside: { photo: 'textures/day_external_4096.jpg', brightness: 1, turn: 2 },   // 360-degree photo seen outside, in control only (see showOutside). A 3.7 MB web copy of day_external.jpg (Unity uses the full 8192 px); '' = the built-in night skyline
     fixtureGlow: 0.5,     // soft glow on the ceiling around each lit fixture (0 = off, 1 = strong)
     floorTexture: {       // leave the three paths empty to use the built-in generated concrete
@@ -140,6 +160,7 @@ document.body.appendChild(renderer.domElement);
 const params = new URLSearchParams(location.search);
 const DEBUG = params.get('debug') === '1';
 const condCode = params.get('c');                                       // the code as given; checked at the end of the script
+if (DEBUG && params.get('probes')) CONFIG.probes.at = params.get('probes').split(',').map(Number).filter(x => x >= 0);   // researcher test: e.g. &probes=2,5
 const pid = (params.get('pid') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);   // only safe characters, for the CSV
 if (DEBUG) document.body.appendChild(VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking', 'local-floor'] }));
 
@@ -947,13 +968,13 @@ const logEvent = (name, detail = '') => { events.push([new Date().toISOString(),
 // The participant can click Qualtrics' Next at any moment, so the page sends its running results to the Qualtrics page
 // around it every few seconds and whenever something is logged. Qualtrics keeps the latest copy and saves it at Next
 // (see qualtrics/garage_question.js, which also adds the Next-click time). Every value is a short string.
-const GARAGE_VERSION = '2026-11-03';                                  // change when the page changes, so the data says which version ran
+const GARAGE_VERSION = '2026-11-03.2';                                  // change when the page changes, so the data says which version ran
 const RESULTS_EVERY_SECONDS = 2;
 const PARENT_ALLOWED = /^https:\/\/([a-z0-9-]+\.)*qualtrics\.com$|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;   // who may receive the results
 const parentOrigin = (() => { try { return new URL(document.referrer).origin; } catch { return ''; } })();
 const AREA_CODES = { upperAisle: 'UA', upperCross: 'UC', ramp: 'R', lowerCross: 'LC', lowerAisle: 'LA' };
 const EVENT_CODES = { page_loaded: 'L', condition_shown: 'C', assets_loaded: 'A', begin: 'B', entered_area: 'E', target_seen: 'T', focus_lost: 'F-', focus_back: 'F+',
-  page_hidden: 'H-', page_visible: 'H+', pointer_locked: 'P+', pointer_released: 'P-', pointer_lock_failed: 'PX', look_by_drag: 'D', error: 'X' };
+  page_hidden: 'H-', page_visible: 'H+', pointer_locked: 'P+', pointer_released: 'P-', pointer_lock_failed: 'PX', look_by_drag: 'D', error: 'X', probe_shown: 'Q+', probe_answered: 'Q-' };
 const LOG_PIECES = 4, LOG_PIECE_CHARS = 900;                            // the event log goes into event_log_1..4, each under 1,000 characters
 let distanceWalked = 0, resultsQueued = false, resultsSent = 0;
 const frameBins = new Uint32Array(201);                                 // how many frames took 0, 1, ... 200+ ms (only after the start click)
@@ -993,7 +1014,7 @@ function currentResults() {
   const seen = after.filter(e => e[2] === 'target_seen');
   // Compact event log: code@ms after the start click (negative = before it), e.g. B@0|E:UC@21857|T:T3@30120
   let log = events.filter(e => EVENT_CODES[e[2]]).map(e => {
-    const code = EVENT_CODES[e[2]], d = e[2] === 'entered_area' ? AREA_CODES[e[3]] : e[2] === 'target_seen' ? e[3] : e[2] === 'condition_shown' ? e[3] : e[2] === 'error' ? e[3].slice(0, 40).replace(/[|@]/g, ' ') : '';
+    const code = EVENT_CODES[e[2]], d = e[2] === 'entered_area' ? AREA_CODES[e[3]] : e[2] === 'target_seen' ? e[3] : e[2] === 'condition_shown' || e[2] === 'probe_shown' ? e[3] : e[2] === 'probe_answered' ? e[3].replace(' skipped', 's') : e[2] === 'error' ? e[3].slice(0, 40).replace(/[|@]/g, ' ') : '';
     return (d ? code + ':' + d : code) + '@' + rel(+e[1]);
   }).join('|');
   const room = LOG_PIECES * LOG_PIECE_CHARS;
@@ -1014,6 +1035,16 @@ function currentResults() {
     load_error: events.filter(e => e[2] === 'error').map(e => e[3]).join('; ').slice(0, 300),
   };
   for (const a of Object.keys(areaMs)) r['area_ms_' + a] = String(Math.round(areaMs[a]));
+  // Pop-up questions: for each, the three words, when it appeared and how long answering took (ms). Unanswered: words empty.
+  CONFIG.probes.at.forEach((_, i) => {
+    const p = probeLog[i] || {}, k = 'probe_' + (i + 1) + '_';
+    r[k + 'word1'] = p.words ? p.words[0] : ''; r[k + 'word2'] = p.words ? p.words[1] : ''; r[k + 'word3'] = p.words ? p.words[2] : '';
+    r[k + 'skipped'] = p.answeredAt === undefined ? '' : p.words.every(w => !w) ? '1' : '0';   // 1 = closed with every box empty
+    r[k + 'at_ms'] = p.shownAt === undefined ? '' : String(rel(p.shownAt)); r[k + 'rt_ms'] = p.answeredAt === undefined ? '' : String(Math.round(p.answeredAt - p.shownAt));
+  });
+  r.probes_answered = String(probeLog.filter(p => p && p.answeredAt !== undefined && p.words.some(w => w)).length);   // closed with at least one word
+  r.probe_ms_total = String(Math.round(probeMsTotal + (probeOpen !== null ? now - probeLog[probeOpen].shownAt : 0)));
+  r.probe_open_since_epoch_ms = probeOpen !== null ? String(epochOf(probeLog[probeOpen].shownAt)) : '';
   for (let i = 0; i < LOG_PIECES; i++) r['event_log_' + (i + 1)] = log.slice(i * LOG_PIECE_CHARS, (i + 1) * LOG_PIECE_CHARS);
   return r;
 }
@@ -1049,6 +1080,44 @@ function begin() {
   window.focus(); lockPointer();
 }
 $('begin').addEventListener('click', begin);
+
+// ---- Pop-up question (CONFIG.probes, wording in GARAGE_TEXT) ----
+// After the set seconds of exploring, the garage pauses behind a dimmed overlay and the mouse is freed so the participant
+// can type up to three words; every box is optional, and Continue (or Enter) always closes it. Walking stops while it is open;
+// the time spent on it is recorded and not counted as exploring.
+let probeOpen = null, probeMsTotal = 0;
+const probeLog = [];                                       // per pop-up: { shownAt, answeredAt, words } (page ms)
+const probeInputs = () => [$('probe-w1'), $('probe-w2'), $('probe-w3')];
+function exploringMs() { const b = events.find(e => e[2] === 'begin'); return b ? performance.now() - +b[1] - probeMsTotal : 0; }
+function checkProbes() {
+  if (!started || probeOpen !== null) return;
+  const i = probeLog.length;
+  if (i < CONFIG.probes.at.length && exploringMs() >= CONFIG.probes.at[i] * 1000) openProbe(i);
+}
+function openProbe(i) {
+  probeOpen = i; probeLog[i] = { shownAt: performance.now() };
+  keysDown.clear();                                      // stop walking
+  if (document.pointerLockElement) document.exitPointerLock();
+  probeInputs().forEach(input => { input.value = ''; });
+  $('probe').hidden = false;
+  setTimeout(() => { if (probeOpen === i) $('probe-w1').focus(); }, 600);   // a pause first, so a walking key still held doesn't type into the box
+  logEvent('probe_shown', String(i + 1));
+}
+$('probe-form').addEventListener('submit', e => {
+  e.preventDefault();
+  if (probeOpen === null) return;
+  const words = probeInputs().map(input => input.value.trim().replace(/[|@\r\n]/g, ' ').slice(0, 40));   // empty = left blank
+  const p = probeLog[probeOpen]; p.answeredAt = performance.now(); p.words = words;
+  probeMsTotal += p.answeredAt - p.shownAt;
+  const n = probeOpen + 1; probeOpen = null;
+  $('probe').hidden = true; document.activeElement?.blur();
+  logEvent('probe_answered', n + (words.every(w => !w) ? ' skipped' : ''));
+  lockPointer();                                         // back to looking around (the click or Enter counts as the user's action)
+});
+probeInputs().forEach((input, k, all) => input.addEventListener('keydown', e => {   // Enter in box 1 or 2 moves on; in box 3 it continues
+  if (e.key === 'Enter' && k < all.length - 1) { e.preventDefault(); all[k + 1].focus(); }
+}));
+setInterval(checkProbes, 100);
 
 // ---- Looking around with pointer lock: the mouse turns the view without dragging; Esc frees the mouse ----
 // If the browser or the Qualtrics frame refuses pointer lock, dragging with the mouse button held turns the view instead.
@@ -1124,7 +1193,7 @@ window.addEventListener('keyup', e => keysDown.delete(e.code));
 window.addEventListener('blur', () => keysDown.clear());   // no stuck keys after switching windows
 function walk() {
   const now = performance.now(), dt = Math.min((now - lastWalkTime) / 1000, 0.1); lastWalkTime = now;
-  if (!started) return;
+  if (!started || probeOpen !== null) return;                     // no walking before the start or while a pop-up is open
   const held = (a, b) => (keysDown.has(a) || keysDown.has(b) ? 1 : 0);
   const ahead = held('KeyW', 'ArrowUp') - held('KeyS', 'ArrowDown'), right = held('KeyD', 'ArrowRight') - held('KeyA', 'ArrowLeft');
   if (!ahead && !right) return;
@@ -1271,6 +1340,8 @@ const garageCapture = async ({ condition = 'control', views = Object.keys(VIEWPO
 };
 // ================= Start: check the link, then show the start screen =================
 const T = window.GARAGE_TEXT;
+$('probe-question').textContent = T.probeQuestion; $('probe-submit').textContent = T.probeButton;
+document.querySelectorAll('.probe-label').forEach((el, i) => { el.textContent = T.probeWord + ' ' + (i + 1); });
 $('begin').textContent = T.begin; $('bar-task').textContent = T.task; $('bar-controls').textContent = T.controls; $('error-text').textContent = T.linkError;
 let CONDITIONS_SHOWN = null;                                           // the code of the condition this page actually built
 const CONDITIONS = { '0': { lighting: 'high', entrapment: 'low', concealment: 'low' },      // 0 = control
